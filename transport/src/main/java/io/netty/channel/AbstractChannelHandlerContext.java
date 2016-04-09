@@ -29,11 +29,26 @@ abstract class AbstractChannelHandlerContext implements ChannelHandlerContext, R
     volatile AbstractChannelHandlerContext next;
     volatile AbstractChannelHandlerContext prev;
 
+    /**
+     * {@link ChannelHandler#handlerAdded(ChannelHandlerContext)} was called.
+     */
+    private static final int ADDED = 1;
+    /**
+     * {@link ChannelHandler#handlerRemoved(ChannelHandlerContext)}.
+     */
+    private static final int REMOVED = 3;
+
+    /**
+     * Neither {@link ChannelHandler#handlerAdded(ChannelHandlerContext)}
+     * nor {@link ChannelHandler#handlerRemoved(ChannelHandlerContext)} was called.
+     */
+    private static final int INIT = 0;
+
     private final boolean inbound;
     private final boolean outbound;
     private final DefaultChannelPipeline pipeline;
     private final String name;
-    private boolean handlerRemoved;
+    private int handlerState = INIT;
 
     final ChannelHandlerInvoker invoker;
     private ChannelFuture succeededFuture;
@@ -318,12 +333,20 @@ abstract class AbstractChannelHandlerContext implements ChannelHandlerContext, R
     }
 
     void setRemoved() {
-        handlerRemoved = true;
+        handlerState = REMOVED;
+    }
+
+    void setAdded() {
+        handlerState = ADDED;
+    }
+
+    final boolean isAdded() {
+        return handlerState == ADDED;
     }
 
     @Override
     public boolean isRemoved() {
-        return handlerRemoved;
+        return handlerState > ADDED;
     }
 
     final void invokeChannelRegistered() {

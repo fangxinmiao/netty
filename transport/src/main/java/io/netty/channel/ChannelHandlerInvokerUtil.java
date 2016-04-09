@@ -27,144 +27,227 @@ import static io.netty.channel.DefaultChannelPipeline.*;
  */
 public final class ChannelHandlerInvokerUtil {
 
+    /**
+     * Makes best possible effort to detect if {@link ChannelHandler#handlerAdded(ChannelHandlerContext)} was called
+     * yet. If not return {@code false} and if called or could not detect return {@code true}.
+     *
+     * If this method returns {@code true} we will not invoke the {@link ChannelHandler} but just forward the event.
+     * This is needed as {@link DefaultChannelPipeline} may already put the {@link ChannelHandler} in the linked-list
+     * but not called {@link }
+     */
+    private static boolean isAdded(ChannelHandlerContext ctx) {
+        if (ctx instanceof AbstractChannelHandlerContext) {
+            return ((AbstractChannelHandlerContext) ctx).isAdded();
+        }
+        return true;
+    }
+
     public static void invokeChannelRegisteredNow(ChannelHandlerContext ctx) {
-        try {
-            ((ChannelInboundHandler) ctx.handler()).channelRegistered(ctx);
-        } catch (Throwable t) {
-            notifyHandlerException(ctx, t);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelInboundHandler) ctx.handler()).channelRegistered(ctx);
+            } catch (Throwable t) {
+                notifyHandlerException(ctx, t);
+            }
+        } else {
+            ctx.fireChannelRegistered();
         }
     }
 
     public static void invokeChannelUnregisteredNow(ChannelHandlerContext ctx) {
-        try {
-            ((ChannelInboundHandler) ctx.handler()).channelUnregistered(ctx);
-        } catch (Throwable t) {
-            notifyHandlerException(ctx, t);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelInboundHandler) ctx.handler()).channelUnregistered(ctx);
+            } catch (Throwable t) {
+                notifyHandlerException(ctx, t);
+            }
+        } else {
+            ctx.fireChannelUnregistered();
         }
     }
 
     public static void invokeChannelActiveNow(final ChannelHandlerContext ctx) {
-        try {
-            ((ChannelInboundHandler) ctx.handler()).channelActive(ctx);
-        } catch (Throwable t) {
-            notifyHandlerException(ctx, t);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelInboundHandler) ctx.handler()).channelActive(ctx);
+            } catch (Throwable t) {
+                notifyHandlerException(ctx, t);
+            }
+        } else {
+            ctx.fireChannelActive();
         }
     }
 
     public static void invokeChannelInactiveNow(final ChannelHandlerContext ctx) {
-        try {
-            ((ChannelInboundHandler) ctx.handler()).channelInactive(ctx);
-        } catch (Throwable t) {
-            notifyHandlerException(ctx, t);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelInboundHandler) ctx.handler()).channelInactive(ctx);
+            } catch (Throwable t) {
+                notifyHandlerException(ctx, t);
+            }
+        } else {
+            ctx.fireChannelInactive();
         }
     }
 
     public static void invokeExceptionCaughtNow(final ChannelHandlerContext ctx, final Throwable cause) {
-        try {
-            ctx.handler().exceptionCaught(ctx, cause);
-        } catch (Throwable t) {
-            if (logger.isWarnEnabled()) {
-                logger.warn("An exception was thrown by a user handler's exceptionCaught() method:", t);
-                logger.warn(".. and the cause of the exceptionCaught() was:", cause);
+        if (isAdded(ctx)) {
+            try {
+                ctx.handler().exceptionCaught(ctx, cause);
+            } catch (Throwable t) {
+                if (logger.isWarnEnabled()) {
+                    logger.warn("An exception was thrown by a user handler's exceptionCaught() method:", t);
+                    logger.warn(".. and the cause of the exceptionCaught() was:", cause);
+                }
             }
+        } else {
+            ctx.fireExceptionCaught(cause);
         }
     }
 
     public static void invokeUserEventTriggeredNow(final ChannelHandlerContext ctx, final Object event) {
-        try {
-            ((ChannelInboundHandler) ctx.handler()).userEventTriggered(ctx, event);
-        } catch (Throwable t) {
-            notifyHandlerException(ctx, t);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelInboundHandler) ctx.handler()).userEventTriggered(ctx, event);
+            } catch (Throwable t) {
+                notifyHandlerException(ctx, t);
+            }
+        } else {
+            ctx.fireUserEventTriggered(event);
         }
     }
 
     public static void invokeChannelReadNow(final ChannelHandlerContext ctx, final Object msg) {
-        try {
-            ((ChannelInboundHandler) ctx.handler()).channelRead(ctx, msg);
-        } catch (Throwable t) {
-            notifyHandlerException(ctx, t);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelInboundHandler) ctx.handler()).channelRead(ctx, msg);
+            } catch (Throwable t) {
+                notifyHandlerException(ctx, t);
+            }
+        } else {
+            ctx.fireChannelRead(msg);
         }
     }
 
     public static void invokeChannelReadCompleteNow(final ChannelHandlerContext ctx) {
-        try {
-            ((ChannelInboundHandler) ctx.handler()).channelReadComplete(ctx);
-        } catch (Throwable t) {
-            notifyHandlerException(ctx, t);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelInboundHandler) ctx.handler()).channelReadComplete(ctx);
+            } catch (Throwable t) {
+                notifyHandlerException(ctx, t);
+            }
+        } else {
+            ctx.fireChannelReadComplete();
         }
     }
 
     public static void invokeChannelWritabilityChangedNow(final ChannelHandlerContext ctx) {
-        try {
-            ((ChannelInboundHandler) ctx.handler()).channelWritabilityChanged(ctx);
-        } catch (Throwable t) {
-            notifyHandlerException(ctx, t);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelInboundHandler) ctx.handler()).channelWritabilityChanged(ctx);
+            } catch (Throwable t) {
+                notifyHandlerException(ctx, t);
+            }
+        } else {
+            ctx.fireChannelWritabilityChanged();
         }
     }
 
     public static void invokeBindNow(
             final ChannelHandlerContext ctx, final SocketAddress localAddress, final ChannelPromise promise) {
-        try {
-            ((ChannelOutboundHandler) ctx.handler()).bind(ctx, localAddress, promise);
-        } catch (Throwable t) {
-            notifyOutboundHandlerException(t, promise);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelOutboundHandler) ctx.handler()).bind(ctx, localAddress, promise);
+            } catch (Throwable t) {
+                notifyOutboundHandlerException(t, promise);
+            }
+        } else {
+            ctx.bind(localAddress, promise);
         }
     }
     public static void invokeConnectNow(
             final ChannelHandlerContext ctx,
             final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
-        try {
-            ((ChannelOutboundHandler) ctx.handler()).connect(ctx, remoteAddress, localAddress, promise);
-        } catch (Throwable t) {
-            notifyOutboundHandlerException(t, promise);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelOutboundHandler) ctx.handler()).connect(ctx, remoteAddress, localAddress, promise);
+            } catch (Throwable t) {
+                notifyOutboundHandlerException(t, promise);
+            }
+        } else {
+            ctx.connect(remoteAddress, localAddress, promise);
         }
     }
 
     public static void invokeDisconnectNow(final ChannelHandlerContext ctx, final ChannelPromise promise) {
-        try {
-            ((ChannelOutboundHandler) ctx.handler()).disconnect(ctx, promise);
-        } catch (Throwable t) {
-            notifyOutboundHandlerException(t, promise);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelOutboundHandler) ctx.handler()).disconnect(ctx, promise);
+            } catch (Throwable t) {
+                notifyOutboundHandlerException(t, promise);
+            }
+        } else {
+            ctx.disconnect(promise);
         }
     }
 
     public static void invokeCloseNow(final ChannelHandlerContext ctx, final ChannelPromise promise) {
-        try {
-            ((ChannelOutboundHandler) ctx.handler()).close(ctx, promise);
-        } catch (Throwable t) {
-            notifyOutboundHandlerException(t, promise);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelOutboundHandler) ctx.handler()).close(ctx, promise);
+            } catch (Throwable t) {
+                notifyOutboundHandlerException(t, promise);
+            }
+        } else {
+            ctx.close(promise);
         }
     }
 
     public static void invokeDeregisterNow(final ChannelHandlerContext ctx, final ChannelPromise promise) {
-        try {
-            ((ChannelOutboundHandler) ctx.handler()).deregister(ctx, promise);
-        } catch (Throwable t) {
-            notifyOutboundHandlerException(t, promise);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelOutboundHandler) ctx.handler()).deregister(ctx, promise);
+            } catch (Throwable t) {
+                notifyOutboundHandlerException(t, promise);
+            }
+        } else {
+            ctx.deregister(promise);
         }
     }
 
     public static void invokeReadNow(final ChannelHandlerContext ctx) {
-        try {
-            ((ChannelOutboundHandler) ctx.handler()).read(ctx);
-        } catch (Throwable t) {
-            notifyHandlerException(ctx, t);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelOutboundHandler) ctx.handler()).read(ctx);
+            } catch (Throwable t) {
+                notifyHandlerException(ctx, t);
+            }
+        } else {
+            ctx.read();
         }
     }
 
     public static void invokeWriteNow(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
-        try {
-            ((ChannelOutboundHandler) ctx.handler()).write(ctx, msg, promise);
-        } catch (Throwable t) {
-            notifyOutboundHandlerException(t, promise);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelOutboundHandler) ctx.handler()).write(ctx, msg, promise);
+            } catch (Throwable t) {
+                notifyOutboundHandlerException(t, promise);
+            }
+        } else {
+            ctx.write(msg, promise);
         }
     }
 
     public static void invokeFlushNow(final ChannelHandlerContext ctx) {
-        try {
-            ((ChannelOutboundHandler) ctx.handler()).flush(ctx);
-        } catch (Throwable t) {
-            notifyHandlerException(ctx, t);
+        if (isAdded(ctx)) {
+            try {
+                ((ChannelOutboundHandler) ctx.handler()).flush(ctx);
+            } catch (Throwable t) {
+                notifyHandlerException(ctx, t);
+            }
+        } else {
+            ctx.flush();
         }
     }
 
