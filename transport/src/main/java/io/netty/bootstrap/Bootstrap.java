@@ -250,7 +250,7 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
         ChannelPipeline p = channel.pipeline();
         p.addLast(handler());
 
-        final Map<ChannelOption<?>, Object> options = options();
+        final Map<ChannelOption<?>, Object> options = options0();
         synchronized (options) {
             for (Entry<ChannelOption<?>, Object> e: options.entrySet()) {
                 try {
@@ -263,7 +263,7 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
             }
         }
 
-        final Map<AttributeKey<?>, Object> attrs = attrs();
+        final Map<AttributeKey<?>, Object> attrs = attrs0();
         synchronized (attrs) {
             for (Entry<AttributeKey<?>, Object> e: attrs.entrySet()) {
                 channel.attr((AttributeKey<Object>) e.getKey()).set(e.getValue());
@@ -295,6 +295,20 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
         Bootstrap bs = new Bootstrap(this);
         bs.group = group;
         return bs;
+    }
+
+    /**
+     * Return the configured remote address or {@code null} if non is configured yet.
+     */
+    public SocketAddress remoteAddress() {
+        return remoteAddress;
+    }
+
+    /**
+     * Return the configured {@link AddressResolverGroup} or the default if non is configured yet.
+     */
+    public AddressResolverGroup<?> resolver() {
+        return resolver;
     }
 
     @Override

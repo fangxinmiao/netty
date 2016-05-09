@@ -35,6 +35,7 @@ import io.netty.util.internal.StringUtil;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -375,31 +376,66 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
         return (B) this;
     }
 
-    final SocketAddress localAddress() {
+    /**
+     * Return the configured local address or {@code null} if non is configured yet.
+     */
+    public final SocketAddress localAddress() {
         return localAddress;
     }
 
+    /**
+     * Return the configured {@link ChannelFactory} or {@code null} if non is configured yet.
+     * Be aware if you call {@link #channel(Class)} it will create the {@link ChannelFactory} for you.
+     */
     @SuppressWarnings("deprecation")
-    final ChannelFactory<? extends C> channelFactory() {
+    public final ChannelFactory<? extends C> channelFactory() {
         return channelFactory;
     }
 
-    final ChannelHandler handler() {
+    /**
+     * Return the configured {@link ChannelHandler} or {@code null} if non is configured yet.
+     */
+    public final ChannelHandler handler() {
         return handler;
     }
 
     /**
      * Return the configured {@link EventLoopGroup} or {@code null} if non is configured yet.
      */
-    public EventLoopGroup group() {
+    public final EventLoopGroup group() {
         return group;
     }
 
-    final Map<ChannelOption<?>, Object> options() {
+    /**
+     * Return a copy of the configured options.
+     */
+    public final Map<ChannelOption<?>, Object> options() {
+        return copiedMap(options);
+    }
+
+    /**
+     * Return a copy of the configured attributes.
+     */
+    public final Map<AttributeKey<?>, Object> attrs() {
+        return copiedMap(attrs);
+    }
+
+    static <K, V> Map<K, V> copiedMap(Map<K, V> map) {
+        final Map<K, V> copied;
+        synchronized (map) {
+            if (map.isEmpty()) {
+                return Collections.emptyMap();
+            }
+            copied = new LinkedHashMap<K, V>(map);
+        }
+        return Collections.unmodifiableMap(copied);
+    }
+
+    final Map<ChannelOption<?>, Object> options0() {
         return options;
     }
 
-    final Map<AttributeKey<?>, Object> attrs() {
+    final Map<AttributeKey<?>, Object> attrs0() {
         return attrs;
     }
 

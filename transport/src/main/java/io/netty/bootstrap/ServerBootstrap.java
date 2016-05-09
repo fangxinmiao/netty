@@ -146,14 +146,36 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
         return childGroup;
     }
 
+    /**
+     * Return the configured {@link ChannelHandler} be used for the child channels or {@code null}
+     * if non is configured yet.
+     */
+    public ChannelHandler childHandler() {
+        return childHandler;
+    }
+
+    /**
+     * Return a copy of the configured options which will be used for the child channels.
+     */
+    public final Map<ChannelOption<?>, Object> childOptions() {
+        return copiedMap(childOptions);
+    }
+
+    /**
+     * Return a copy of the configured attributes which will be used for the child channels.
+     */
+    public final Map<AttributeKey<?>, Object> childAttrs() {
+        return copiedMap(childAttrs);
+    }
+
     @Override
     void init(Channel channel) throws Exception {
-        final Map<ChannelOption<?>, Object> options = options();
+        final Map<ChannelOption<?>, Object> options = options0();
         synchronized (options) {
             channel.config().setOptions(options);
         }
 
-        final Map<AttributeKey<?>, Object> attrs = attrs();
+        final Map<AttributeKey<?>, Object> attrs = attrs0();
         synchronized (attrs) {
             for (Entry<AttributeKey<?>, Object> e: attrs.entrySet()) {
                 @SuppressWarnings("unchecked")
