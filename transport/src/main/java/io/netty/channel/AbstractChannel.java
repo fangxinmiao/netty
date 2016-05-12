@@ -434,11 +434,6 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
         }
 
         @Override
-        public final ChannelHandlerInvoker invoker() {
-            return eventLoop().asInvoker();
-        }
-
-        @Override
         public final ChannelOutboundBuffer outboundBuffer() {
             return outboundBuffer;
         }

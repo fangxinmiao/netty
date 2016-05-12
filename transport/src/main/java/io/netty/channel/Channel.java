@@ -459,11 +459,6 @@ public interface Channel extends AttributeMap, Comparable<Channel> {
         RecvByteBufAllocator.Handle recvBufAllocHandle();
 
         /**
-         * Returns the {@link ChannelHandlerInvoker} which is used by default unless specified by a user.
-         */
-        ChannelHandlerInvoker invoker();
-
-        /**
          * Return the {@link SocketAddress} to which is bound local or
          * {@code null} if none.
          */

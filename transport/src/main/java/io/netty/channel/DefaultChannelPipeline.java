@@ -17,7 +17,6 @@ package io.netty.channel;
 
 import io.netty.channel.Channel.Unsafe;
 import io.netty.util.ReferenceCountUtil;
-import io.netty.util.ResourceLeakDetector;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.EventExecutorGroup;
 import io.netty.util.concurrent.FastThreadLocal;
@@ -61,12 +60,7 @@ final class DefaultChannelPipeline implements ChannelPipeline {
     final AbstractChannelHandlerContext head;
     final AbstractChannelHandlerContext tail;
 
-    private final boolean touch = ResourceLeakDetector.isEnabled();
-
-    /**
-     * @see #findInvoker(EventExecutorGroup)
-     */
-    private Map<EventExecutorGroup, ChannelHandlerInvoker> childInvokers;
+    private Map<EventExecutorGroup, EventExecutor> childExecutors;
 
     /**
      * This is the head of a linked list that is processed by {@link #callHandlerAddedForAllHandlers()} and so process
@@ -84,7 +78,7 @@ final class DefaultChannelPipeline implements ChannelPipeline {
      */
     private boolean registered;
 
-    DefaultChannelPipeline(AbstractChannel channel) {
+    public DefaultChannelPipeline(AbstractChannel channel) {
         if (channel == null) {
             throw new NullPointerException("channel");
         }
@@ -97,8 +91,27 @@ final class DefaultChannelPipeline implements ChannelPipeline {
         tail.prev = head;
     }
 
-    Object touch(Object msg, AbstractChannelHandlerContext next) {
-        return touch ? ReferenceCountUtil.touch(msg, next) : msg;
+    private AbstractChannelHandlerContext newContext(EventExecutorGroup group, String name, ChannelHandler handler) {
+        return new DefaultChannelHandlerContext(this, childExecutor(group), name, handler);
+    }
+
+    private EventExecutor childExecutor(EventExecutorGroup group) {
+        if (group == null) {
+            return null;
+        }
+        Map<EventExecutorGroup, EventExecutor> childExecutors = this.childExecutors;
+        if (childExecutors == null) {
+            // Use size of 4 as most people only use one extra EventExecutor.
+            childExecutors = this.childExecutors = new IdentityHashMap<EventExecutorGroup, EventExecutor>(4);
+        }
+        // Pin one of the child executors once and remember it so that the same child executor
+        // is used to fire events for the same channel.
+        EventExecutor childExecutor = childExecutors.get(group);
+        if (childExecutor == null) {
+            childExecutor = group.next();
+            childExecutors.put(group, childExecutor);
+        }
+        return childExecutor;
     }
 
     @Override
@@ -108,33 +121,24 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelPipeline addFirst(String name, ChannelHandler handler) {
-        return addFirst(null, null, name, handler);
+        return addFirst(null, name, handler);
     }
 
     @Override
     public ChannelPipeline addFirst(EventExecutorGroup group, String name, ChannelHandler handler) {
-        return addFirst(group, null, name, handler);
-    }
-
-    @Override
-    public ChannelPipeline addFirst(ChannelHandlerInvoker invoker, String name, ChannelHandler handler) {
-        return addFirst(null, invoker, name, handler);
-    }
-
-    private ChannelPipeline addFirst(
-            EventExecutorGroup group, ChannelHandlerInvoker invoker, String name, ChannelHandler handler) {
         final AbstractChannelHandlerContext newCtx;
         final EventExecutor executor;
         final boolean inEventLoop;
         synchronized (this) {
+            if (name == null) {
+                name = generateName(handler);
+            } else {
+                checkDuplicateName(name);
+            }
             checkMultiplicity(handler);
 
-            if (group != null) {
-                invoker = findInvoker(group);
-            }
-
-            newCtx = new DefaultChannelHandlerContext(this, invoker, filterName(name, handler), handler);
-            executor = executorSafe(invoker);
+            newCtx = newContext(group, name, handler);
+            executor = executorSafe(newCtx.executor);
 
             // If the executor is null it means that the channel was not registered on an eventloop yet.
             // In this case we add the context to the pipeline and add a task that will call
@@ -176,35 +180,24 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelPipeline addLast(String name, ChannelHandler handler) {
-        return addLast(null, null, name, handler);
+        return addLast(null, name, handler);
     }
 
     @Override
     public ChannelPipeline addLast(EventExecutorGroup group, String name, ChannelHandler handler) {
-        return addLast(group, null, name, handler);
-    }
-
-    @Override
-    public ChannelPipeline addLast(ChannelHandlerInvoker invoker, String name, ChannelHandler handler) {
-        return addLast(null, invoker, name, handler);
-    }
-
-    private ChannelPipeline addLast(EventExecutorGroup group, ChannelHandlerInvoker invoker,
-                                    String name, ChannelHandler handler) {
-        assertGroupAndInvoker(group, invoker);
-
         final EventExecutor executor;
         final AbstractChannelHandlerContext newCtx;
         final boolean inEventLoop;
         synchronized (this) {
+            if (name == null) {
+                name = generateName(handler);
+            } else {
+                checkDuplicateName(name);
+            }
             checkMultiplicity(handler);
 
-            if (group != null) {
-                invoker = findInvoker(group);
-            }
-
-            newCtx = new DefaultChannelHandlerContext(this, invoker, filterName(name, handler), handler);
-            executor = executorSafe(invoker);
+            newCtx = newContext(group, name, handler);
+            executor = executorSafe(newCtx.executor);
 
             // If the executor is null it means that the channel was not registered on an eventloop yet.
             // In this case we add the context to the pipeline and add a task that will call
@@ -245,25 +238,12 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelPipeline addBefore(String baseName, String name, ChannelHandler handler) {
-        return addBefore(null, null, baseName, name, handler);
+        return addBefore(null, baseName, name, handler);
     }
 
     @Override
     public ChannelPipeline addBefore(
             EventExecutorGroup group, String baseName, String name, ChannelHandler handler) {
-        return addBefore(group, null, baseName, name, handler);
-    }
-
-    @Override
-    public ChannelPipeline addBefore(
-            ChannelHandlerInvoker invoker, String baseName, String name, ChannelHandler handler) {
-        return addBefore(null, invoker, baseName, name, handler);
-    }
-
-    private ChannelPipeline addBefore(EventExecutorGroup group,
-            ChannelHandlerInvoker invoker, String baseName, String name, ChannelHandler handler) {
-        assertGroupAndInvoker(group, invoker);
-
         final EventExecutor executor;
         final AbstractChannelHandlerContext newCtx;
         final AbstractChannelHandlerContext ctx;
@@ -271,13 +251,14 @@ final class DefaultChannelPipeline implements ChannelPipeline {
         synchronized (this) {
             checkMultiplicity(handler);
             ctx = getContextOrDie(baseName);
-
-            if (group != null) {
-                invoker = findInvoker(group);
+            if (name == null) {
+                name = generateName(handler);
+            } else {
+                checkDuplicateName(name);
             }
 
-            newCtx = new DefaultChannelHandlerContext(this, invoker, filterName(name, handler), handler);
-            executor = executorSafe(invoker);
+            newCtx = newContext(group, name, handler);
+            executor = executorSafe(newCtx.executor);
 
             // If the executor is null it means that the channel was not registered on an eventloop yet.
             // In this case we add the context to the pipeline and add a task that will call
@@ -319,25 +300,12 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelPipeline addAfter(String baseName, String name, ChannelHandler handler) {
-        return addAfter(null, null, baseName, name, handler);
+        return addAfter(null, baseName, name, handler);
     }
 
     @Override
     public ChannelPipeline addAfter(
-            EventExecutorGroup group, String baseName, String name, ChannelHandler handler) {
-        return addAfter(group, null, baseName, name, handler);
-    }
-
-    @Override
-    public ChannelPipeline addAfter(
-            ChannelHandlerInvoker invoker, String baseName, String name, ChannelHandler handler) {
-        return addAfter(null, invoker, baseName, name, handler);
-    }
-
-    private ChannelPipeline addAfter(EventExecutorGroup group,
-            ChannelHandlerInvoker invoker, String baseName, String name, ChannelHandler handler) {
-        assertGroupAndInvoker(group, invoker);
-
+            EventExecutorGroup group, String baseName, final String name, ChannelHandler handler) {
         final EventExecutor executor;
         final AbstractChannelHandlerContext newCtx;
         final AbstractChannelHandlerContext ctx;
@@ -346,13 +314,10 @@ final class DefaultChannelPipeline implements ChannelPipeline {
         synchronized (this) {
             checkMultiplicity(handler);
             ctx = getContextOrDie(baseName);
+            checkDuplicateName(name);
 
-            if (group != null) {
-                invoker = findInvoker(group);
-            }
-
-            newCtx = new DefaultChannelHandlerContext(this, invoker, filterName(name, handler), handler);
-            executor = executorSafe(invoker);
+            newCtx = newContext(group, name, handler);
+            executor = executorSafe(newCtx.executor);
 
             // If the executor is null it means that the channel was not registered on an eventloop yet.
             // In this case we remove the context from the pipeline and add a task that will call
@@ -392,11 +357,11 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelPipeline addFirst(ChannelHandler... handlers) {
-        return addFirst((ChannelHandlerInvoker) null, handlers);
+        return addFirst(null, handlers);
     }
 
     @Override
-    public ChannelPipeline addFirst(EventExecutorGroup group, ChannelHandler... handlers) {
+    public ChannelPipeline addFirst(EventExecutorGroup executor, ChannelHandler... handlers) {
         if (handlers == null) {
             throw new NullPointerException("handlers");
         }
@@ -413,31 +378,7 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
         for (int i = size - 1; i >= 0; i --) {
             ChannelHandler h = handlers[i];
-            addFirst(group, null, h);
-        }
-
-        return this;
-    }
-
-    @Override
-    public ChannelPipeline addFirst(ChannelHandlerInvoker invoker, ChannelHandler... handlers) {
-        if (handlers == null) {
-            throw new NullPointerException("handlers");
-        }
-        if (handlers.length == 0 || handlers[0] == null) {
-            return this;
-        }
-
-        int size;
-        for (size = 1; size < handlers.length; size ++) {
-            if (handlers[size] == null) {
-                break;
-            }
-        }
-
-        for (int i = size - 1; i >= 0; i --) {
-            ChannelHandler h = handlers[i];
-            addFirst(invoker, null, h);
+            addFirst(executor, generateName(h), h);
         }
 
         return this;
@@ -445,11 +386,11 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelPipeline addLast(ChannelHandler... handlers) {
-        return addLast((ChannelHandlerInvoker) null, handlers);
+        return addLast(null, handlers);
     }
 
     @Override
-    public ChannelPipeline addLast(EventExecutorGroup group, ChannelHandler... handlers) {
+    public ChannelPipeline addLast(EventExecutorGroup executor, ChannelHandler... handlers) {
         if (handlers == null) {
             throw new NullPointerException("handlers");
         }
@@ -458,53 +399,10 @@ final class DefaultChannelPipeline implements ChannelPipeline {
             if (h == null) {
                 break;
             }
-            addLast(group, null, h);
+            addLast(executor, generateName(h), h);
         }
 
         return this;
-    }
-
-    @Override
-    public ChannelPipeline addLast(ChannelHandlerInvoker invoker, ChannelHandler... handlers) {
-        if (handlers == null) {
-            throw new NullPointerException("handlers");
-        }
-
-        for (ChannelHandler h: handlers) {
-            if (h == null) {
-                break;
-            }
-            addLast(invoker, null, h);
-        }
-
-        return this;
-    }
-
-    private ChannelHandlerInvoker findInvoker(EventExecutorGroup group) {
-        if (group == null) {
-            return null;
-        }
-
-        // Lazily initialize the data structure that maps an EventExecutorGroup to a ChannelHandlerInvoker.
-        Map<EventExecutorGroup, ChannelHandlerInvoker> childInvokers = this.childInvokers;
-        if (childInvokers == null) {
-            childInvokers = this.childInvokers = new IdentityHashMap<EventExecutorGroup, ChannelHandlerInvoker>(4);
-        }
-
-        // Pick one of the child executors and remember its invoker
-        // so that the same invoker is used to fire events for the same channel.
-        ChannelHandlerInvoker  invoker = childInvokers.get(group);
-        if (invoker == null) {
-            EventExecutor executor = group.next();
-            if (executor instanceof EventLoop) {
-                invoker = ((EventLoop) executor).asInvoker();
-            } else {
-                invoker = new DefaultChannelHandlerInvoker(executor);
-            }
-            childInvokers.put(group, invoker);
-        }
-
-        return invoker;
     }
 
     private String generateName(ChannelHandler handler) {
@@ -558,7 +456,7 @@ final class DefaultChannelPipeline implements ChannelPipeline {
         final EventExecutor executor;
         final boolean inEventLoop;
         synchronized (this) {
-            executor = executorSafe(ctx.invoker);
+            executor = executorSafe(ctx.executor);
 
             // If the executor is null it means that the channel was not registered on an eventloop yet.
             // In this case we remove the context from the pipeline and add a task that will call
@@ -639,15 +537,17 @@ final class DefaultChannelPipeline implements ChannelPipeline {
         final boolean inEventLoop;
         synchronized (this) {
             checkMultiplicity(newHandler);
-
             if (newName == null) {
-                newName = ctx.name();
-            } else if (!ctx.name().equals(newName)) {
-                newName = filterName(newName, newHandler);
+                newName = generateName(newHandler);
+            } else {
+                boolean sameName = ctx.name().equals(newName);
+                if (!sameName) {
+                    checkDuplicateName(newName);
+                }
             }
 
-            newCtx = new DefaultChannelHandlerContext(this, ctx.invoker, newName, newHandler);
-            executor = executorSafe(ctx.invoker);
+            newCtx = newContext(ctx.executor, newName, newHandler);
+            executor = executorSafe(ctx.executor);
 
             // If the executor is null it means that the channel was not registered on an eventloop yet.
             // In this case we replace the context in the pipeline
@@ -1156,7 +1056,7 @@ final class DefaultChannelPipeline implements ChannelPipeline {
     }
 
     @Override
-    public ChannelFuture deregister(ChannelPromise promise) {
+    public ChannelFuture deregister(final ChannelPromise promise) {
         return tail.deregister(promise);
     }
 
@@ -1186,16 +1086,10 @@ final class DefaultChannelPipeline implements ChannelPipeline {
         return tail.writeAndFlush(msg);
     }
 
-    private String filterName(String name, ChannelHandler handler) {
-        if (name == null) {
-            return generateName(handler);
+    private void checkDuplicateName(String name) {
+        if (context0(name) != null) {
+            throw new IllegalArgumentException("Duplicate handler name: " + name);
         }
-
-        if (context0(name) == null) {
-            return name;
-        }
-
-        throw new IllegalArgumentException("Duplicate handler name: " + name);
     }
 
     private AbstractChannelHandlerContext context0(String name) {
@@ -1281,18 +1175,14 @@ final class DefaultChannelPipeline implements ChannelPipeline {
         }
     }
 
-    private EventExecutor executorSafe(ChannelHandlerInvoker invoker) {
-        if (invoker == null) {
+    private EventExecutor executorSafe(EventExecutor eventExecutor) {
+        if (eventExecutor == null) {
             // We check for channel().isRegistered and handlerAdded because even if isRegistered() is false we
-            // can safely access the invoker() if handlerAdded is true. This is because in this case the Channel
+            // can safely access the eventLoop() if handlerAdded is true. This is because in this case the Channel
             // was previously registered and so we can still access the old EventLoop to dispatch things.
-            return channel.isRegistered() || registered ? channel.unsafe().invoker().executor() : null;
+            return channel.isRegistered() || registered ? channel.eventLoop() : null;
         }
-        return invoker.executor();
-    }
-
-    private static void assertGroupAndInvoker(EventExecutorGroup group, ChannelHandlerInvoker invoker) {
-        assert group == null || invoker == null : "either group or invoker must be null";
+        return eventExecutor;
     }
 
     // A special catch-all handler that handles both bytes and messages.
@@ -1368,7 +1258,7 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
         private static final String HEAD_NAME = generateName0(HeadContext.class);
 
-        private final Unsafe unsafe;
+        protected final Unsafe unsafe;
 
         HeadContext(DefaultChannelPipeline pipeline) {
             super(pipeline, null, HEAD_NAME, false, true);
@@ -1381,14 +1271,13 @@ final class DefaultChannelPipeline implements ChannelPipeline {
         }
 
         @Override
-        public void handlerAdded(ChannelHandlerContext ctx) throws Exception { }
+        public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+            // NOOP
+        }
 
         @Override
-        public void handlerRemoved(ChannelHandlerContext ctx) throws Exception { }
-
-        @Override
-        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-            ctx.fireExceptionCaught(cause);
+        public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
+            // NOOP
         }
 
         @Override
@@ -1434,6 +1323,11 @@ final class DefaultChannelPipeline implements ChannelPipeline {
         @Override
         public void flush(ChannelHandlerContext ctx) throws Exception {
             unsafe.flush();
+        }
+
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+            ctx.fireExceptionCaught(cause);
         }
     }
 
