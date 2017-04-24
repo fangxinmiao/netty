@@ -15,51 +15,48 @@
  */
 package io.netty.handler.codec.http2;
 
-import static io.netty.handler.logging.LogLevel.INFO;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelConfig;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelHandlerInvoker;
-import io.netty.channel.ChannelHandlerInvokerUtil;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.handler.codec.UnsupportedMessageTypeException;
-import io.netty.handler.codec.http.HttpServerUpgradeHandler.UpgradeEvent;
+import io.netty.handler.codec.http2.Http2Exception.StreamException;
+import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.collection.IntObjectHashMap;
+import io.netty.util.collection.IntObjectMap;
+import io.netty.util.collection.IntObjectMap.PrimitiveEntry;
 import io.netty.util.concurrent.EventExecutor;
-import io.netty.util.internal.OneTimeTask;
 import io.netty.util.internal.UnstableApi;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+
+import static io.netty.handler.codec.http2.AbstractHttp2StreamChannel.CLOSE_MESSAGE;
+import static io.netty.handler.codec.http2.Http2CodecUtil.isOutboundStream;
+import static io.netty.handler.codec.http2.Http2CodecUtil.isStreamIdValid;
+import static io.netty.handler.codec.http2.Http2Error.STREAM_CLOSED;
+import static java.lang.String.format;
 
 /**
- * An HTTP/2 handler that creates child channels for each stream. Creating outgoing streams is not
- * yet supported. Server-side HTTP to HTTP/2 upgrade is supported in conjunction with {@link
- * Http2ServerUpgradeCodec}; the necessary HTTP-to-HTTP/2 conversion is performed automatically.
- *
- * <p><em>This API is very immature.</em> The Http2Connection-based API is currently preferred over
- * this API. This API is targeted to eventually replace or reduce the need for the
- * Http2Connection-based API.
- *
- * <p>This handler notifies the pipeline of channel events, such as {@link Http2GoAwayFrame}. It
- * is also capable of writing such messages. Directly writing {@link Http2StreamFrame}s for this
- * handler is unsupported.
- *
- * <h3>Child Channels</h3>
+ * An HTTP/2 handler that creates child channels for each stream.
  *
  * <p>When a new stream is created, a new {@link Channel} is created for it. Applications send and
- * receive {@link Http2StreamFrame}s on the created channel. The {@link Http2StreamFrame#stream} is
- * expected to be {@code null}, but the channel can use the field for its own bookkeeping. {@link
- * ByteBuf}s cannot be processed by the channel; all writes that reach the head of the pipeline must
- * be an instance of {@link Http2StreamFrame}.  Writes that reach the head of the pipeline are
- * processed directly by this handler and cannot be intercepted.
+ * receive {@link Http2StreamFrame}s on the created channel. {@link ByteBuf}s cannot be processed by the channel;
+ * all writes that reach the head of the pipeline must be an instance of {@link Http2StreamFrame}. Writes that reach
+ * the head of the pipeline are processed directly by this handler and cannot be intercepted.
  *
  * <p>The child channel will be notified of user events that impact the stream, such as {@link
  * Http2GoAwayFrame} and {@link Http2ResetFrame}, as soon as they occur. Although {@code
@@ -69,161 +66,248 @@ import java.util.List;
  * free to close the channel in response to such events if they don't have use for any queued
  * messages.
  *
- * <p>{@link ChannelConfig#setMaxMessagesPerRead(int)} and {@link
- * ChannelConfig#setAutoRead(boolean)} are supported.
+ * <p>Outbound streams are supported via the {@link Http2StreamChannelBootstrap}.
+ *
+ * <p>{@link ChannelConfig#setMaxMessagesPerRead(int)} and {@link ChannelConfig#setAutoRead(boolean)} are supported.
  */
 @UnstableApi
 public final class Http2MultiplexCodec extends ChannelDuplexHandler {
-    private static final Http2FrameLogger HTTP2_FRAME_LOGGER = new Http2FrameLogger(INFO, Http2MultiplexCodec.class);
 
-    private final ChannelHandler streamHandler;
-    private final EventLoopGroup streamGroup;
-    private final Http2ConnectionHandler http2Handler;
-    private final Http2Connection.PropertyKey streamInfoKey;
-    private final List<StreamInfo> streamsToFireChildReadComplete = new ArrayList<StreamInfo>();
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(Http2MultiplexCodec.class);
+
+    private final Http2StreamChannelBootstrap bootstrap;
+
+    private final List<Http2StreamChannel> channelsToFireChildReadComplete = new ArrayList<Http2StreamChannel>();
+    private final boolean server;
     private ChannelHandlerContext ctx;
-    private ChannelHandlerContext http2HandlerCtx;
+    private volatile Runnable flushTask;
 
-    /**
-     * Construct a new handler whose child channels run in the same event loop as this handler.
-     *
-     * @param server {@code true} this is a server
-     * @param streamHandler the handler added to channels for remotely-created streams. It must be
-     *     {@link ChannelHandler.Sharable}.
-     */
-    public Http2MultiplexCodec(boolean server, ChannelHandler streamHandler) {
-        this(server, streamHandler, null);
-    }
+    private final IntObjectMap<Http2StreamChannel> childChannels = new IntObjectHashMap<Http2StreamChannel>();
 
     /**
      * Construct a new handler whose child channels run in a different event loop.
      *
      * @param server {@code true} this is a server
-     * @param streamHandler the handler added to channels for remotely-created streams. It must be
-     *     {@link ChannelHandler.Sharable}.
-     * @param streamGroup event loop for registering child channels
+     * @param bootstrap bootstrap used to instantiate child channels for remotely-created streams.
      */
-    public Http2MultiplexCodec(boolean server, ChannelHandler streamHandler,
-            EventLoopGroup streamGroup) {
-        this(server, streamHandler, streamGroup, new DefaultHttp2FrameWriter());
-    }
-
-    Http2MultiplexCodec(boolean server, ChannelHandler streamHandler,
-            EventLoopGroup streamGroup, Http2FrameWriter frameWriter) {
-        if (!streamHandler.getClass().isAnnotationPresent(Sharable.class)) {
-            throw new IllegalArgumentException("streamHandler must be Sharable");
+    public Http2MultiplexCodec(boolean server, Http2StreamChannelBootstrap bootstrap) {
+        if (bootstrap.parentChannel() != null) {
+            throw new IllegalStateException("The parent channel must not be set on the bootstrap.");
         }
-        this.streamHandler = streamHandler;
-        this.streamGroup = streamGroup;
-        Http2Connection connection = new DefaultHttp2Connection(server);
-        frameWriter = new Http2OutboundFrameLogger(frameWriter, HTTP2_FRAME_LOGGER);
-        Http2ConnectionEncoder encoder = new DefaultHttp2ConnectionEncoder(connection, frameWriter);
-        Http2FrameReader reader = new Http2InboundFrameLogger(new DefaultHttp2FrameReader(), HTTP2_FRAME_LOGGER);
-        Http2ConnectionDecoder decoder = new DefaultHttp2ConnectionDecoder(connection, encoder, reader);
-        decoder.frameListener(new FrameListener());
-        http2Handler = new InternalHttp2ConnectionHandler(decoder, encoder, new Http2Settings());
-        http2Handler.connection().addListener(new ConnectionListener());
-        streamInfoKey = http2Handler.connection().newKey();
+        this.server = server;
+        this.bootstrap = new Http2StreamChannelBootstrap(bootstrap);
     }
 
-    Http2ConnectionHandler connectionHandler() {
-        return http2Handler;
-    }
-
-    /**
-     * Save context and load any dependencies.
-     */
     @Override
-    public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+    public void handlerAdded(ChannelHandlerContext ctx) {
         this.ctx = ctx;
-        ctx.pipeline().addBefore(ctx.executor(), ctx.name(), null, http2Handler);
-        http2HandlerCtx = ctx.pipeline().context(http2Handler);
+        bootstrap.parentChannel(ctx.channel());
     }
 
-    /**
-     * Clean up any dependencies.
-     */
     @Override
-    public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
-      ctx.pipeline().remove(http2Handler);
-    }
-
-    /**
-     * Handles the cleartext HTTP upgrade event. If an upgrade occurred, sends a simple response via
-     * HTTP/2 on stream 1 (the stream specifically reserved for cleartext HTTP upgrade).
-     */
-    @Override
-    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
-        if (!(evt instanceof UpgradeEvent)) {
-            super.userEventTriggered(ctx, evt);
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        if (!(cause instanceof StreamException)) {
+            ctx.fireExceptionCaught(cause);
             return;
         }
 
-        UpgradeEvent upgrade = (UpgradeEvent) evt;
-        ctx.fireUserEventTriggered(upgrade.retain());
+        StreamException streamEx = (StreamException) cause;
         try {
-            Http2Stream stream = http2Handler.connection().stream(Http2CodecUtil.HTTP_UPGRADE_STREAM_ID);
-            // TODO: improve handler/stream lifecycle so that stream isn't active before handler added.
-            // The stream was already made active, but ctx may have been null so it wasn't initialized.
-            // https://github.com/netty/netty/issues/4942
-            new ConnectionListener().onStreamActive(stream);
-            upgrade.upgradeRequest().headers().setInt(
-                HttpConversionUtil.ExtensionHeaderNames.STREAM_ID.text(), Http2CodecUtil.HTTP_UPGRADE_STREAM_ID);
-            new InboundHttpToHttp2Adapter(http2Handler.connection(), http2Handler.decoder().frameListener())
-                .channelRead(ctx, upgrade.upgradeRequest().retain());
-        } finally {
-            upgrade.release();
-        }
-    }
-
-    /**
-     * Processes all {@link Http2Frame}s. {@link Http2StreamFrame}s may only originate in child
-     * streams.
-     */
-    @Override
-    public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
-            throws Exception {
-        if (!(msg instanceof Http2Frame)) {
-            super.write(ctx, msg, promise);
-            return;
-        }
-        try {
-            if (msg instanceof Http2StreamFrame) {
-                Object streamObject = ((Http2StreamFrame) msg).stream();
-                int streamId = ((Http2StreamChannel) streamObject).stream.id();
-                if (msg instanceof Http2DataFrame) {
-                    Http2DataFrame frame = (Http2DataFrame) msg;
-                    http2Handler.encoder().writeData(http2HandlerCtx, streamId, frame.content().retain(),
-                        frame.padding(), frame.isEndStream(), promise);
-                } else if (msg instanceof Http2HeadersFrame) {
-                    Http2HeadersFrame frame = (Http2HeadersFrame) msg;
-                    http2Handler.encoder().writeHeaders(
-                        http2HandlerCtx, streamId, frame.headers(), frame.padding(), frame.isEndStream(), promise);
-                } else if (msg instanceof Http2ResetFrame) {
-                    Http2ResetFrame frame = (Http2ResetFrame) msg;
-                    http2Handler.resetStream(http2HandlerCtx, streamId, frame.errorCode(), promise);
-                } else {
-                    throw new UnsupportedMessageTypeException(msg);
-                }
-            } else if (msg instanceof Http2GoAwayFrame) {
-                Http2GoAwayFrame frame = (Http2GoAwayFrame) msg;
-                int lastStreamId = http2Handler.connection().remote().lastStreamCreated()
-                    + frame.extraStreamIds() * 2;
-                http2Handler.goAway(
-                    http2HandlerCtx, lastStreamId, frame.errorCode(), frame.content().retain(), promise);
+            Http2StreamChannel childChannel = childChannels.get(streamEx.streamId());
+            if (childChannel != null) {
+                childChannel.pipeline().fireExceptionCaught(streamEx);
             } else {
-                throw new UnsupportedMessageTypeException(msg);
+                logger.warn(format("Exception caught for unknown HTTP/2 stream '%d'", streamEx.streamId()),
+                            streamEx);
             }
         } finally {
-            ReferenceCountUtil.release(msg);
+            onStreamClosed(streamEx.streamId());
         }
     }
 
-    ChannelFuture createStreamChannel(ChannelHandlerContext ctx, Http2Stream stream,
-            ChannelHandler handler) {
-        EventLoopGroup group = streamGroup != null ? streamGroup : ctx.channel().eventLoop();
-        Http2StreamChannel channel = new Http2StreamChannel(stream);
+    // Override this to signal it will never throw an exception.
+    @Override
+    public void flush(ChannelHandlerContext ctx) {
+        ctx.flush();
+    }
+
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        if (!(msg instanceof Http2Frame)) {
+            ctx.fireChannelRead(msg);
+            return;
+        }
+        if (msg instanceof Http2StreamFrame) {
+            Http2StreamFrame frame = (Http2StreamFrame) msg;
+            int streamId = frame.streamId();
+            Http2StreamChannel childChannel = childChannels.get(streamId);
+            if (childChannel == null) {
+                // TODO: Combine with DefaultHttp2ConnectionDecoder.shouldIgnoreHeadersOrDataFrame logic.
+                ReferenceCountUtil.release(msg);
+                throw new StreamException(streamId, STREAM_CLOSED, format("Received %s frame for an unknown stream %d",
+                                                                          frame.name(), streamId));
+            }
+            fireChildReadAndRegister(childChannel, frame);
+        } else if (msg instanceof Http2GoAwayFrame) {
+            Http2GoAwayFrame goAwayFrame = (Http2GoAwayFrame) msg;
+            for (PrimitiveEntry<Http2StreamChannel> entry : childChannels.entries()) {
+                Http2StreamChannel childChannel = entry.value();
+                int streamId = entry.key();
+                if (streamId > goAwayFrame.lastStreamId() && isOutboundStream(server, streamId)) {
+                    childChannel.pipeline().fireUserEventTriggered(goAwayFrame.retainedDuplicate());
+                }
+            }
+            goAwayFrame.release();
+        } else {
+            // It's safe to release, as UnsupportedMessageTypeException just calls msg.getClass()
+            ReferenceCountUtil.release(msg);
+            throw new UnsupportedMessageTypeException(msg);
+        }
+    }
+
+    private void fireChildReadAndRegister(Http2StreamChannel childChannel, Http2StreamFrame frame) {
+        // Can't use childChannel.fireChannelRead() as it would fire independent of whether
+        // channel.read() had been called.
+        childChannel.fireChildRead(frame);
+        if (!childChannel.inStreamsToFireChildReadComplete) {
+            channelsToFireChildReadComplete.add(childChannel);
+            childChannel.inStreamsToFireChildReadComplete = true;
+        }
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        if (evt instanceof Http2StreamActiveEvent) {
+            Http2StreamActiveEvent activeEvent = (Http2StreamActiveEvent) evt;
+            onStreamActive(activeEvent.streamId(), activeEvent.headers());
+        } else if (evt instanceof Http2StreamClosedEvent) {
+            onStreamClosed(((Http2StreamClosedEvent) evt).streamId());
+        } else {
+            ctx.fireUserEventTriggered(evt);
+        }
+    }
+
+    private void onStreamActive(int streamId, Http2HeadersFrame headersFrame) {
+        final Http2StreamChannel childChannel;
+        if (isOutboundStream(server, streamId)) {
+            if (!(headersFrame instanceof ChannelCarryingHeadersFrame)) {
+                throw new IllegalArgumentException("needs to be wrapped");
+            }
+            childChannel = ((ChannelCarryingHeadersFrame) headersFrame).channel();
+            childChannel.streamId(streamId);
+        } else {
+            ChannelFuture future = bootstrap.connect(streamId);
+            childChannel = (Http2StreamChannel) future.channel();
+        }
+
+        Http2StreamChannel existing = childChannels.put(streamId, childChannel);
+        assert existing == null;
+    }
+
+    private void onStreamClosed(int streamId) {
+        final Http2StreamChannel childChannel = childChannels.remove(streamId);
+        if (childChannel != null) {
+            final EventLoop eventLoop = childChannel.eventLoop();
+            if (eventLoop.inEventLoop()) {
+                onStreamClosed0(childChannel);
+            } else {
+                eventLoop.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        onStreamClosed0(childChannel);
+                    }
+                });
+            }
+        }
+    }
+
+    private void onStreamClosed0(Http2StreamChannel childChannel) {
+        assert childChannel.eventLoop().inEventLoop();
+
+        childChannel.onStreamClosedFired = true;
+        childChannel.fireChildRead(CLOSE_MESSAGE);
+    }
+
+    void flushFromStreamChannel() {
+        EventExecutor executor = ctx.executor();
+        if (executor.inEventLoop()) {
+            flush(ctx);
+        } else {
+            Runnable task = flushTask;
+            if (task == null) {
+                task = flushTask = new Runnable() {
+                    @Override
+                    public void run() {
+                        flush(ctx);
+                    }
+                };
+            }
+            executor.execute(task);
+        }
+    }
+
+    void writeFromStreamChannel(Object msg, boolean flush) {
+        writeFromStreamChannel(msg, ctx.newPromise(), flush);
+    }
+
+    void writeFromStreamChannel(final Object msg, final ChannelPromise promise, final boolean flush) {
+        EventExecutor executor = ctx.executor();
+        if (executor.inEventLoop()) {
+            writeFromStreamChannel0(msg, flush, promise);
+        } else {
+            try {
+                executor.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        writeFromStreamChannel0(msg, flush, promise);
+                    }
+                });
+            } catch (Throwable cause) {
+                promise.setFailure(cause);
+            }
+        }
+    }
+
+    private void writeFromStreamChannel0(Object msg, boolean flush, ChannelPromise promise) {
+        try {
+            write(ctx, msg, promise);
+        } catch (Throwable cause) {
+            promise.tryFailure(cause);
+        }
+        if (flush) {
+            flush(ctx);
+        }
+    }
+
+    /**
+     * Notifies any child streams of the read completion.
+     */
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) {
+        for (int i = 0; i < channelsToFireChildReadComplete.size(); i++) {
+            Http2StreamChannel childChannel = channelsToFireChildReadComplete.get(i);
+            // Clear early in case fireChildReadComplete() causes it to need to be re-processed
+            childChannel.inStreamsToFireChildReadComplete = false;
+            childChannel.fireChildReadComplete();
+        }
+        channelsToFireChildReadComplete.clear();
+    }
+
+    ChannelFuture createStreamChannel(Channel parentChannel, EventLoopGroup group, ChannelHandler handler,
+                                              Map<ChannelOption<?>, Object> options,
+                                              Map<AttributeKey<?>, Object> attrs,
+                                              int streamId) {
+        final Http2StreamChannel channel = new Http2StreamChannel(parentChannel);
+        if (isStreamIdValid(streamId)) {
+            assert !isOutboundStream(server, streamId);
+            assert ctx.channel().eventLoop().inEventLoop();
+            channel.streamId(streamId);
+        }
         channel.pipeline().addLast(handler);
+
+        initOpts(channel, options);
+        initAttrs(channel, attrs);
+
         ChannelFuture future = group.register(channel);
         // Handle any errors that occurred on the local thread while registering. Even though
         // failures can happen after this point, they will be handled by the channel by closing the
@@ -238,206 +322,88 @@ public final class Http2MultiplexCodec extends ChannelDuplexHandler {
         return future;
     }
 
-    /**
-     * Notifies any child streams of the read completion.
-     */
-    @Override
-    public void channelReadComplete(ChannelHandlerContext ctx) {
-        for (int i = 0; i < streamsToFireChildReadComplete.size(); i++) {
-            final StreamInfo streamInfo = streamsToFireChildReadComplete.get(i);
-            // Clear early in case fireChildReadComplete() causes it to need to be re-processed
-            streamInfo.inStreamsToFireChildReadComplete = false;
-            streamInfo.childChannel.fireChildReadComplete();
-        }
-        streamsToFireChildReadComplete.clear();
-    }
-
-    void fireChildReadAndRegister(StreamInfo streamInfo, Object msg) {
-        // Can't use childChannel.fireChannelRead() as it would fire independent of whether
-        // channel.read() had been called.
-        streamInfo.childChannel.fireChildRead(msg);
-        if (!streamInfo.inStreamsToFireChildReadComplete) {
-            streamsToFireChildReadComplete.add(streamInfo);
-            streamInfo.inStreamsToFireChildReadComplete = true;
-        }
-    }
-
-    final class ConnectionListener extends Http2ConnectionAdapter {
-        @Override
-        public void onStreamActive(Http2Stream stream) {
-            if (ctx == null) {
-                // UPGRADE stream is active before handlerAdded().
-                return;
-            }
-            // If it is an outgoing stream, then we already created the channel.
-            // TODO: support outgoing streams. https://github.com/netty/netty/issues/4913
-            if (stream.getProperty(streamInfoKey) != null) {
-                return;
-            }
-            ChannelFuture future = createStreamChannel(ctx, stream, streamHandler);
-            stream.setProperty(streamInfoKey, new StreamInfo((Http2StreamChannel) future.channel()));
-        }
-
-        @Override
-        public void onStreamClosed(Http2Stream stream) {
-            final StreamInfo streamInfo = (StreamInfo) stream.getProperty(streamInfoKey);
-            if (streamInfo != null) {
-                final EventLoop eventLoop = streamInfo.childChannel.eventLoop();
-                if (eventLoop.inEventLoop()) {
-                    onStreamClosed0(streamInfo);
-                } else {
-                    eventLoop.execute(new OneTimeTask() {
-                        @Override
-                        public void run() {
-                            onStreamClosed0(streamInfo);
-                        }
-                    });
-                }
-            }
-        }
-
-        private void onStreamClosed0(StreamInfo streamInfo) {
-            streamInfo.childChannel.onStreamClosedFired = true;
-            streamInfo.childChannel.fireChildRead(AbstractHttp2StreamChannel.CLOSE_MESSAGE);
-        }
-
-        @Override
-        public void onGoAwayReceived(final int lastStreamId, long errorCode, ByteBuf debugData) {
-            final Http2GoAwayFrame goAway = new DefaultHttp2GoAwayFrame(errorCode, debugData);
-            try {
-                http2Handler.connection().forEachActiveStream(new Http2StreamVisitor() {
-                    @Override
-                    public boolean visit(Http2Stream stream) {
-                        if (stream.id() > lastStreamId
-                                && http2Handler.connection().local().isValidStreamId(stream.id())) {
-                            StreamInfo streamInfo = (StreamInfo) stream.getProperty(streamInfoKey);
-                            // TODO: Can we force a user interaction pattern that doesn't require us to duplicate()?
-                            // https://github.com/netty/netty/issues/4943
-                            streamInfo.childChannel.pipeline().fireUserEventTriggered(goAway.duplicate().retain());
-                        }
-                        return true;
+    @SuppressWarnings("unchecked")
+    private static void initOpts(Channel channel, Map<ChannelOption<?>, Object> opts) {
+        if (opts != null) {
+            for (Entry<ChannelOption<?>, Object> e: opts.entrySet()) {
+                try {
+                    if (!channel.config().setOption((ChannelOption<Object>) e.getKey(), e.getValue())) {
+                        logger.warn("Unknown channel option: " + e);
                     }
-                });
-            } catch (Throwable t) {
-                ctx.invoker().invokeExceptionCaught(ctx, t);
-            }
-            ctx.fireUserEventTriggered(goAway.duplicate().retain());
-        }
-    }
-
-    class InternalHttp2ConnectionHandler extends Http2ConnectionHandler {
-        public InternalHttp2ConnectionHandler(Http2ConnectionDecoder decoder, Http2ConnectionEncoder encoder,
-                Http2Settings initialSettings) {
-            super(decoder, encoder, initialSettings);
-        }
-
-        @Override
-        protected void onStreamError(ChannelHandlerContext ctx, Throwable cause,
-                Http2Exception.StreamException http2Ex) {
-            try {
-                Http2Stream stream = http2Handler.connection().stream(http2Ex.streamId());
-                if (stream == null) {
-                    return;
+                } catch (Throwable t) {
+                    logger.warn("Failed to set a channel option: " + channel, t);
                 }
-                StreamInfo streamInfo = (StreamInfo) stream.getProperty(streamInfoKey);
-                if (streamInfo == null) {
-                    return;
-                }
-                streamInfo.childChannel.pipeline().fireExceptionCaught(http2Ex);
-            } finally {
-                super.onStreamError(ctx, cause, http2Ex);
             }
         }
     }
 
-    class FrameListener extends Http2FrameAdapter {
-        @Override
-        public void onRstStreamRead(ChannelHandlerContext ctx, int streamId, long errorCode)
-                throws Http2Exception {
-            Http2Stream stream = http2Handler.connection().stream(streamId);
-            StreamInfo streamInfo = (StreamInfo) stream.getProperty(streamInfoKey);
-            // Use a user event in order to circumvent read queue.
-            streamInfo.childChannel.pipeline().fireUserEventTriggered(new DefaultHttp2ResetFrame(errorCode));
-        }
-
-        @Override
-        public void onHeadersRead(ChannelHandlerContext ctx, int streamId,
-                Http2Headers headers, int streamDependency, short weight, boolean
-                exclusive, int padding, boolean endStream) throws Http2Exception {
-            onHeadersRead(ctx, streamId, headers, padding, endStream);
-        }
-
-        @Override
-        public void onHeadersRead(ChannelHandlerContext ctx, int streamId, Http2Headers headers,
-                int padding, boolean endOfStream) throws Http2Exception {
-            Http2Stream stream = http2Handler.connection().stream(streamId);
-            StreamInfo streamInfo = (StreamInfo) stream.getProperty(streamInfoKey);
-            fireChildReadAndRegister(streamInfo, new DefaultHttp2HeadersFrame(headers, endOfStream, padding));
-        }
-
-        @Override
-        public int onDataRead(ChannelHandlerContext ctx, int streamId, ByteBuf data, int padding,
-                boolean endOfStream) throws Http2Exception {
-            Http2Stream stream = http2Handler.connection().stream(streamId);
-            StreamInfo streamInfo = (StreamInfo) stream.getProperty(streamInfoKey);
-            fireChildReadAndRegister(streamInfo, new DefaultHttp2DataFrame(data.retain(), endOfStream, padding));
-            // We return the bytes in bytesConsumed() once the stream channel consumed the bytes.
-            return 0;
+    @SuppressWarnings("unchecked")
+    private static void initAttrs(Channel channel, Map<AttributeKey<?>, Object> attrs) {
+        if (attrs != null) {
+            for (Entry<AttributeKey<?>, Object> e: attrs.entrySet()) {
+                channel.attr((AttributeKey<Object>) e.getKey()).set(e.getValue());
+            }
         }
     }
 
-    static final class StreamInfo {
-        final Http2StreamChannel childChannel;
+    final class Http2StreamChannel extends AbstractHttp2StreamChannel implements ChannelFutureListener {
+        boolean onStreamClosedFired;
+
         /**
-         * {@code true} if stream is in {@link Http2MultiplexCodec#steamsToFireChildReadComplete}.
+         * {@code true} if stream is in {@link Http2MultiplexCodec#channelsToFireChildReadComplete}.
          */
         boolean inStreamsToFireChildReadComplete;
 
-        StreamInfo(Http2StreamChannel childChannel) {
-            this.childChannel = childChannel;
-        }
-    }
-
-    // This class uses ctx.invoker().invoke* instead of ctx.* to send to the ctx's handler instead
-    // of the 'next' handler.
-    final class Http2StreamChannel extends AbstractHttp2StreamChannel {
-        private final Http2Stream stream;
-        boolean onStreamClosedFired;
-
-        Http2StreamChannel(Http2Stream stream) {
-            super(ctx.channel());
-            this.stream = stream;
+        Http2StreamChannel(Channel parentChannel) {
+            super(parentChannel);
         }
 
         @Override
         protected void doClose() throws Exception {
-            if (!onStreamClosedFired) {
-                Http2StreamFrame resetFrame = new DefaultHttp2ResetFrame(Http2Error.CANCEL).setStream(this);
-                ChannelHandlerInvoker invoker = ctx.invoker();
-                invoker.invokeWrite(ctx, resetFrame, ctx.newPromise());
-                invoker.invokeFlush(ctx);
+            if (!onStreamClosedFired && isStreamIdValid(streamId())) {
+                Http2StreamFrame resetFrame = new DefaultHttp2ResetFrame(Http2Error.CANCEL).streamId(streamId());
+                writeFromStreamChannel(resetFrame, true);
             }
             super.doClose();
         }
 
         @Override
         protected void doWrite(Object msg) {
-            if (!(msg instanceof Http2StreamFrame)) {
+
+            if (msg instanceof Http2StreamFrame) {
+                Http2StreamFrame frame = (Http2StreamFrame) msg;
+                ChannelPromise promise = ctx.newPromise();
+                if (isStreamIdValid(frame.streamId())) {
+                    ReferenceCountUtil.release(frame);
+                    throw new IllegalArgumentException("Stream id must not be set on the frame. Was: "
+                        + frame.streamId());
+                }
+                if (!isStreamIdValid(streamId())) {
+                    if (!(frame instanceof Http2HeadersFrame)) {
+                        ReferenceCountUtil.release(frame);
+                        throw new IllegalArgumentException("The first frame must be a headers frame. Was: "
+                            + frame.name());
+                    }
+                    frame = new ChannelCarryingHeadersFrame((Http2HeadersFrame) frame, this);
+                    // Handle errors on stream creation
+                    promise.addListener(this);
+                } else {
+                    frame.streamId(streamId());
+                }
+                writeFromStreamChannel(frame, promise, false);
+            } else if (msg instanceof Http2GoAwayFrame) {
+                ChannelPromise promise = ctx.newPromise();
+                promise.addListener(this);
+                writeFromStreamChannel(msg, promise, false);
+            } else {
                 ReferenceCountUtil.release(msg);
-                throw new IllegalArgumentException("Message must be an Http2StreamFrame: " + msg);
+                throw new IllegalArgumentException("Message must be an Http2GoAwayFrame or Http2StreamFrame: " + msg);
             }
-            Http2StreamFrame frame = (Http2StreamFrame) msg;
-            if (frame.stream() != null) {
-                ReferenceCountUtil.release(frame);
-                throw new IllegalArgumentException("Stream must be null on the frame");
-            }
-            frame.setStream(this);
-            ctx.invoker().invokeWrite(ctx, frame, ctx.newPromise());
         }
 
         @Override
         protected void doWriteComplete() {
-            ctx.invoker().invokeFlush(ctx);
+            flushFromStreamChannel();
         }
 
         @Override
@@ -447,25 +413,65 @@ public final class Http2MultiplexCodec extends ChannelDuplexHandler {
 
         @Override
         protected void bytesConsumed(final int bytes) {
-            EventExecutor executor = ctx.executor();
-            if (executor.inEventLoop()) {
-                bytesConsumed0(bytes);
-            } else {
-                executor.execute(new OneTimeTask() {
-                    @Override
-                    public void run() {
-                        bytesConsumed0(bytes);
-                    }
-                });
-            }
+            ctx.write(new DefaultHttp2WindowUpdateFrame(bytes).streamId(streamId()));
         }
 
-        private void bytesConsumed0(int bytes) {
-            try {
-                http2Handler.connection().local().flowController().consumeBytes(stream, bytes);
-            } catch (Throwable t) {
-                ChannelHandlerInvokerUtil.invokeExceptionCaughtNow(ctx, t);
+        @Override
+        public void operationComplete(ChannelFuture future) throws Exception {
+            Throwable cause = future.cause();
+            if (cause != null) {
+                pipeline().fireExceptionCaught(cause);
+                close();
             }
+        }
+    }
+
+    /**
+     * Wraps the first {@link Http2HeadersFrame} of local/outbound stream. This allows us to get to the child channel
+     * when receiving the {@link Http2StreamActiveEvent} from the frame codec. See {@link #onStreamActive}.
+     */
+    private static final class ChannelCarryingHeadersFrame implements Http2HeadersFrame {
+
+        private final Http2HeadersFrame frame;
+        private final Http2StreamChannel childChannel;
+
+        ChannelCarryingHeadersFrame(Http2HeadersFrame frame, Http2StreamChannel childChannel) {
+            this.frame = frame;
+            this.childChannel = childChannel;
+        }
+
+        @Override
+        public Http2Headers headers() {
+            return frame.headers();
+        }
+
+        @Override
+        public boolean isEndStream() {
+            return frame.isEndStream();
+        }
+
+        @Override
+        public int padding() {
+            return frame.padding();
+        }
+
+        @Override
+        public Http2StreamFrame streamId(int streamId) {
+            return frame.streamId(streamId);
+        }
+
+        @Override
+        public int streamId() {
+            return frame.streamId();
+        }
+
+        @Override
+        public String name() {
+            return frame.name();
+        }
+
+        Http2StreamChannel channel() {
+            return childChannel;
         }
     }
 }

@@ -21,7 +21,7 @@ import io.netty.buffer.ByteBuf;
  * Uncompresses an input {@link ByteBuf} encoded with Snappy compression into an
  * output {@link ByteBuf}.
  *
- * See <a href="http://code.google.com/p/snappy/source/browse/trunk/format_description.txt">snappy format</a>.
+ * See <a href="https://github.com/google/snappy/blob/master/format_description.txt">snappy format</a>.
  */
 public final class Snappy {
 
@@ -611,14 +611,7 @@ public final class Snappy {
     static int calculateChecksum(ByteBuf data, int offset, int length) {
         Crc32c crc32 = new Crc32c();
         try {
-            if (data.hasArray()) {
-                crc32.update(data.array(), data.arrayOffset() + offset, length);
-            } else {
-                byte[] array = new byte[length];
-                data.getBytes(offset, array);
-                crc32.update(array, 0, length);
-            }
-
+            crc32.update(data, offset, length);
             return maskChecksum((int) crc32.getValue());
         } finally {
             crc32.reset();

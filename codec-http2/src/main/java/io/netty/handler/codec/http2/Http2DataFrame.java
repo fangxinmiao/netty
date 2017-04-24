@@ -24,8 +24,6 @@ import io.netty.util.internal.UnstableApi;
  */
 @UnstableApi
 public interface Http2DataFrame extends Http2StreamFrame, ByteBufHolder {
-    @Override
-    Http2DataFrame setStream(Object stream);
 
     /**
      * {@code true} if this frame is the last one in this direction of the stream.
@@ -48,6 +46,12 @@ public interface Http2DataFrame extends Http2StreamFrame, ByteBufHolder {
 
     @Override
     Http2DataFrame duplicate();
+
+    @Override
+    Http2DataFrame retainedDuplicate();
+
+    @Override
+    Http2DataFrame replace(ByteBuf content);
 
     @Override
     Http2DataFrame retain();

@@ -15,6 +15,11 @@
  */
 package io.netty.handler.ssl;
 
+import java.net.IDN;
+import java.net.SocketAddress;
+import java.util.List;
+import java.util.Locale;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.channel.ChannelHandlerContext;
@@ -26,17 +31,14 @@ import io.netty.util.AsyncMapping;
 import io.netty.util.CharsetUtil;
 import io.netty.util.DomainNameMapping;
 import io.netty.util.Mapping;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
 import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.ObjectUtil;
+import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
-
-import java.net.IDN;
-import java.net.SocketAddress;
-import java.util.List;
-import java.util.Locale;
 
 /**
  * <p>Enables <a href="https://tools.ietf.org/html/rfc3546#section-3.1">SNI
@@ -54,7 +56,7 @@ public class SniHandler extends ByteToMessageDecoder implements ChannelOutboundH
             InternalLoggerFactory.getInstance(SniHandler.class);
     private static final Selection EMPTY_SELECTION = new Selection(null, null);
 
-    private final AsyncMapping<String, SslContext> mapping;
+    protected final AsyncMapping<String, SslContext> mapping;
 
     private boolean handshakeFailed;
     private boolean suppressRead;
@@ -129,17 +131,17 @@ public class SniHandler extends ByteToMessageDecoder implements ChannelOutboundH
                             final int len = SslUtils.getEncryptedPacketLength(in, readerIndex);
 
                             // Not an SSL/TLS packet
-                            if (len == -1) {
+                            if (len == SslUtils.NOT_ENCRYPTED) {
                                 handshakeFailed = true;
                                 NotSslRecordException e = new NotSslRecordException(
                                         "not an SSL/TLS record: " + ByteBufUtil.hexDump(in));
                                 in.skipBytes(in.readableBytes());
-                                ctx.fireExceptionCaught(e);
 
                                 SslUtils.notifyHandshakeFailure(ctx, e);
-                                return;
+                                throw e;
                             }
-                            if (writerIndex - readerIndex - SslUtils.SSL_RECORD_HEADER_LENGTH < len) {
+                            if (len == SslUtils.NOT_ENOUGH_DATA ||
+                                    writerIndex - readerIndex - SslUtils.SSL_RECORD_HEADER_LENGTH < len) {
                                 // Not enough data
                                 return;
                             }
@@ -241,8 +243,12 @@ public class SniHandler extends ByteToMessageDecoder implements ChannelOutboundH
                                             final String hostname = in.toString(offset, serverNameLength,
                                                                                 CharsetUtil.UTF_8);
 
-                                            select(ctx, IDN.toASCII(hostname,
-                                                                    IDN.ALLOW_UNASSIGNED).toLowerCase(Locale.US));
+                                            try {
+                                                select(ctx, IDN.toASCII(hostname,
+                                                                        IDN.ALLOW_UNASSIGNED).toLowerCase(Locale.US));
+                                            } catch (Throwable t) {
+                                                PlatformDependent.throwException(t);
+                                            }
                                             return;
                                         } else {
                                             // invalid enum value
@@ -270,11 +276,11 @@ public class SniHandler extends ByteToMessageDecoder implements ChannelOutboundH
         }
     }
 
-    private void select(final ChannelHandlerContext ctx, final String hostname) {
-        Future<SslContext> future = mapping.map(hostname, ctx.executor().<SslContext>newPromise());
+    private void select(final ChannelHandlerContext ctx, final String hostname) throws Exception {
+        Future<SslContext> future = lookup(ctx, hostname);
         if (future.isDone()) {
             if (future.isSuccess()) {
-                replaceHandler(ctx, new Selection(future.getNow(), hostname));
+                onSslContext(ctx, hostname, future.getNow());
             } else {
                 throw new DecoderException("failed to get the SslContext for " + hostname, future.cause());
             }
@@ -286,7 +292,11 @@ public class SniHandler extends ByteToMessageDecoder implements ChannelOutboundH
                     try {
                         suppressRead = false;
                         if (future.isSuccess()) {
-                            replaceHandler(ctx, new Selection(future.getNow(), hostname));
+                            try {
+                                onSslContext(ctx, hostname, future.getNow());
+                            } catch (Throwable cause) {
+                                ctx.fireExceptionCaught(new DecoderException(cause));
+                            }
                         } else {
                             ctx.fireExceptionCaught(new DecoderException("failed to get the SslContext for "
                                     + hostname, future.cause()));
@@ -302,10 +312,54 @@ public class SniHandler extends ByteToMessageDecoder implements ChannelOutboundH
         }
     }
 
-    private void replaceHandler(ChannelHandlerContext ctx, Selection selection) {
-        this.selection = selection;
-        SslHandler sslHandler = selection.context.newHandler(ctx.alloc());
-        ctx.pipeline().replace(this, SslHandler.class.getName(), sslHandler);
+    /**
+     * The default implementation will simply call {@link AsyncMapping#map(Object, Promise)} but
+     * users can override this method to implement custom behavior.
+     *
+     * @see AsyncMapping#map(Object, Promise)
+     */
+    protected Future<SslContext> lookup(ChannelHandlerContext ctx, String hostname) throws Exception {
+        return mapping.map(hostname, ctx.executor().<SslContext>newPromise());
+    }
+
+    /**
+     * Called upon successful completion of the {@link AsyncMapping}'s {@link Future}.
+     *
+     * @see #select(ChannelHandlerContext, String)
+     */
+    private void onSslContext(ChannelHandlerContext ctx, String hostname, SslContext sslContext) {
+        selection = new Selection(sslContext, hostname);
+        try {
+            replaceHandler(ctx, hostname, sslContext);
+        } catch (Throwable cause) {
+            selection = EMPTY_SELECTION;
+            PlatformDependent.throwException(cause);
+        }
+    }
+
+    /**
+     * The default implementation of this method will simply replace {@code this} {@link SniHandler}
+     * instance with a {@link SslHandler}. Users may override this method to implement custom behavior.
+     *
+     * Please be aware that this method may get called after a client has already disconnected and
+     * custom implementations must take it into consideration when overriding this method.
+     *
+     * It's also possible for the hostname argument to be {@code null}.
+     */
+    protected void replaceHandler(ChannelHandlerContext ctx, String hostname, SslContext sslContext) throws Exception {
+        SslHandler sslHandler = null;
+        try {
+            sslHandler = sslContext.newHandler(ctx.alloc());
+            ctx.pipeline().replace(this, SslHandler.class.getName(), sslHandler);
+            sslHandler = null;
+        } finally {
+            // Since the SslHandler was not inserted into the pipeline the ownership of the SSLEngine was not
+            // transferred to the SslHandler.
+            // See https://github.com/netty/netty/issues/5678
+            if (sslHandler != null) {
+                ReferenceCountUtil.safeRelease(sslHandler.engine());
+            }
+        }
     }
 
     @Override

@@ -15,10 +15,13 @@
  */
 package io.netty.buffer;
 
+import io.netty.util.internal.PlatformDependent;
+import org.junit.Assume;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.io.IOException;
-import java.util.Random;
+import java.nio.ByteBuffer;
 
 import static org.junit.Assert.*;
 
@@ -27,12 +30,13 @@ import static org.junit.Assert.*;
  */
 public class SlicedByteBufTest extends AbstractByteBufTest {
 
-    private final Random random = new Random();
-
     @Override
-    protected ByteBuf newBuffer(int length) {
+    protected ByteBuf newBuffer(int length, int maxCapacity) {
+        Assume.assumeTrue(maxCapacity == Integer.MAX_VALUE);
         ByteBuf buffer = Unpooled.wrappedBuffer(
-                new byte[length * 2], random.nextInt(length - 1) + 1, length);
+                new byte[length * 2], length > 1 ?
+                        PlatformDependent.threadLocalRandom().nextInt(length - 1) + 1 : 0, length);
+        assertEquals(0, buffer.readerIndex());
         assertEquals(length, buffer.writerIndex());
         return buffer;
     }
@@ -127,6 +131,28 @@ public class SlicedByteBufTest extends AbstractByteBufTest {
     }
 
     @Test
+    @Override
+    public void testForEachByteDesc2() {
+        // Ignore for SlicedByteBuf
+    }
+
+    @Test
+    @Override
+    public void testForEachByte2() {
+        // Ignore for SlicedByteBuf
+    }
+
+    @Ignore("Sliced ByteBuf objects don't allow the capacity to change. So this test would fail and shouldn't be run")
+    @Override
+    public void testDuplicateCapacityChange() {
+    }
+
+    @Ignore("Sliced ByteBuf objects don't allow the capacity to change. So this test would fail and shouldn't be run")
+    @Override
+    public void testRetainedDuplicateCapacityChange() {
+    }
+
+    @Test
     public void testReaderIndexAndMarks() {
         ByteBuf wrapped = Unpooled.buffer(16);
         try {
@@ -134,7 +160,7 @@ public class SlicedByteBufTest extends AbstractByteBufTest {
             wrapped.readerIndex(2);
             wrapped.markWriterIndex();
             wrapped.markReaderIndex();
-            ByteBuf slice = new SlicedByteBuf(wrapped, 4, 4);
+            ByteBuf slice = wrapped.slice(4, 4);
             assertEquals(0, slice.readerIndex());
             assertEquals(4, slice.writerIndex());
 
@@ -171,5 +197,19 @@ public class SlicedByteBufTest extends AbstractByteBufTest {
         assertEquals(0, buffer.refCnt());
         assertEquals(0, slice1.refCnt());
         assertEquals(0, slice2.refCnt());
+    }
+
+    @Override
+    @Test(expected = IndexOutOfBoundsException.class)
+    public void testGetBytesByteBuffer() {
+        byte[] bytes = {'a', 'b', 'c', 'd', 'e', 'f', 'g'};
+        // Ensure destination buffer is bigger then what is wrapped in the ByteBuf.
+        ByteBuffer nioBuffer = ByteBuffer.allocate(bytes.length + 1);
+        ByteBuf wrappedBuffer = Unpooled.wrappedBuffer(bytes).slice(0, bytes.length - 1);
+        try {
+            wrappedBuffer.getBytes(wrappedBuffer.readerIndex(), nioBuffer);
+        } finally {
+            wrappedBuffer.release();
+        }
     }
 }

@@ -195,7 +195,7 @@ public interface ChannelConfig {
     ChannelConfig setAutoRead(boolean autoRead);
 
     /**
-     * @deprecated From version 5.0, {@link Channel} will not be closed on write failure.
+     * @deprecated  Auto close will be removed in a future release.
      *
      * Returns {@code true} if and only if the {@link Channel} will be closed automatically and immediately on
      * write failure.  The default is {@code false}.
@@ -204,9 +204,9 @@ public interface ChannelConfig {
     boolean isAutoClose();
 
     /**
-     * @deprecated From version 5.0, {@link Channel} will not be closed on write failure.
+     * @deprecated  Auto close will be removed in a future release.
      *
-     * Sets whether the {@link Channel} should be closed automatically and immediately on write faillure.
+     * Sets whether the {@link Channel} should be closed automatically and immediately on write failure.
      * The default is {@code false}.
      */
     @Deprecated
@@ -220,13 +220,11 @@ public interface ChannelConfig {
     int getWriteBufferHighWaterMark();
 
     /**
-     * @deprecated Use {@link #setWriteBufferWaterMark(WriteBufferWaterMark)}
      * <p>
      * Sets the high water mark of the write buffer.  If the number of bytes
      * queued in the write buffer exceeds this value, {@link Channel#isWritable()}
      * will start to return {@code false}.
      */
-    @Deprecated
     ChannelConfig setWriteBufferHighWaterMark(int writeBufferHighWaterMark);
 
     /**
@@ -239,7 +237,6 @@ public interface ChannelConfig {
     int getWriteBufferLowWaterMark();
 
     /**
-     * @deprecated Use {@link #setWriteBufferWaterMark(WriteBufferWaterMark)}
      * <p>
      * Sets the low water mark of the write buffer.  Once the number of bytes
      * queued in the write buffer exceeded the
@@ -247,7 +244,6 @@ public interface ChannelConfig {
      * dropped down below this value, {@link Channel#isWritable()} will start to return
      * {@code true} again.
      */
-    @Deprecated
     ChannelConfig setWriteBufferLowWaterMark(int writeBufferLowWaterMark);
 
     /**

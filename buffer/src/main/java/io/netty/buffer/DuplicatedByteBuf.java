@@ -39,15 +39,21 @@ public class DuplicatedByteBuf extends AbstractDerivedByteBuf {
     private final ByteBuf buffer;
 
     public DuplicatedByteBuf(ByteBuf buffer) {
+        this(buffer, buffer.readerIndex(), buffer.writerIndex());
+    }
+
+    DuplicatedByteBuf(ByteBuf buffer, int readerIndex, int writerIndex) {
         super(buffer.maxCapacity());
 
         if (buffer instanceof DuplicatedByteBuf) {
             this.buffer = ((DuplicatedByteBuf) buffer).buffer;
+        } else if (buffer instanceof AbstractPooledDerivedByteBuf) {
+            this.buffer = buffer.unwrap();
         } else {
             this.buffer = buffer;
         }
 
-        setIndex(buffer.readerIndex(), buffer.writerIndex());
+        setIndex(readerIndex, writerIndex);
         markReaderIndex();
         markWriterIndex();
     }

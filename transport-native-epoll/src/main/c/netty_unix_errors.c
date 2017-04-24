@@ -100,6 +100,22 @@ static jint netty_unix_errors_errnoEINPROGRESS(JNIEnv* env, jclass clazz) {
     return EINPROGRESS;
 }
 
+static jint netty_unix_errors_errorECONNREFUSED(JNIEnv* env, jclass clazz) {
+    return ECONNREFUSED;
+}
+
+static jint netty_unix_errors_errorEISCONN(JNIEnv* env, jclass clazz) {
+    return EISCONN;
+}
+
+static jint netty_unix_errors_errorEALREADY(JNIEnv* env, jclass clazz) {
+    return EALREADY;
+}
+
+static jint netty_unix_errors_errorENETUNREACH(JNIEnv* env, jclass clazz) {
+    return ENETUNREACH;
+}
+
 static jstring netty_unix_errors_strError(JNIEnv* env, jclass clazz, jint error) {
     return (*env)->NewStringUTF(env, strerror(error));
 }
@@ -114,6 +130,10 @@ static const JNINativeMethod statically_referenced_fixed_method_table[] = {
   { "errnoEAGAIN", "()I", (void *) netty_unix_errors_errnoEAGAIN },
   { "errnoEWOULDBLOCK", "()I", (void *) netty_unix_errors_errnoEWOULDBLOCK },
   { "errnoEINPROGRESS", "()I", (void *) netty_unix_errors_errnoEINPROGRESS },
+  { "errorECONNREFUSED", "()I", (void *) netty_unix_errors_errorECONNREFUSED },
+  { "errorEISCONN", "()I", (void *) netty_unix_errors_errorEISCONN },
+  { "errorEALREADY", "()I", (void *) netty_unix_errors_errorEALREADY },
+  { "errorENETUNREACH", "()I", (void *) netty_unix_errors_errorENETUNREACH },
   { "strError", "(I)Ljava/lang/String;", (void *) netty_unix_errors_strError }
 };
 static const jint statically_referenced_fixed_method_table_size = sizeof(statically_referenced_fixed_method_table) / sizeof(statically_referenced_fixed_method_table[0]);

@@ -65,7 +65,10 @@ public class HelloWorldHttp2Handler extends ChannelDuplexHandler {
      */
     public void onDataRead(ChannelHandlerContext ctx, Http2DataFrame data) throws Exception {
         if (data.isEndStream()) {
-            sendResponse(ctx, data.content().retain());
+            sendResponse(ctx, data.content());
+        } else {
+            // We do not send back the response to the remote-peer, so we need to release it.
+            data.release();
         }
     }
 
@@ -76,7 +79,7 @@ public class HelloWorldHttp2Handler extends ChannelDuplexHandler {
             throws Exception {
         if (headers.isEndStream()) {
             ByteBuf content = ctx.alloc().buffer();
-            content.writeBytes(RESPONSE_BYTES);
+            content.writeBytes(RESPONSE_BYTES.duplicate());
             ByteBufUtil.writeAscii(content, " - via HTTP/2");
             sendResponse(ctx, content);
         }
@@ -85,7 +88,7 @@ public class HelloWorldHttp2Handler extends ChannelDuplexHandler {
     /**
      * Sends a "Hello World" DATA frame to the client.
      */
-    private void sendResponse(ChannelHandlerContext ctx, ByteBuf payload) {
+    private static void sendResponse(ChannelHandlerContext ctx, ByteBuf payload) {
         // Send a frame for the response status
         Http2Headers headers = new DefaultHttp2Headers().status(OK.codeAsText());
         ctx.write(new DefaultHttp2HeadersFrame(headers));

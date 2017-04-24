@@ -16,6 +16,7 @@ package io.netty.handler.codec.http2;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.FullHttpMessage;
 import io.netty.handler.codec.http.FullHttpRequest;
@@ -53,7 +54,7 @@ public class InboundHttp2ToHttpAdapter extends Http2EventAdapter {
         @Override
         public FullHttpMessage copyIfNeeded(FullHttpMessage msg) {
             if (msg instanceof FullHttpRequest) {
-                FullHttpRequest copy = ((FullHttpRequest) msg).copy(null);
+                FullHttpRequest copy = ((FullHttpRequest) msg).replace(Unpooled.buffer(0));
                 copy.headers().remove(HttpHeaderNames.EXPECT);
                 return copy;
             }
@@ -126,7 +127,7 @@ public class InboundHttp2ToHttpAdapter extends Http2EventAdapter {
      *
      * @param ctx The context to fire the event on
      * @param msg The message to send
-     * @param release {@code true} to release if present in {@link #messageMap}. {@code false} otherwise.
+     * @param release {@code true} to call release on the value if it is present. {@code false} to not call release.
      * @param stream the stream of the message which is being fired
      */
     protected void fireChannelRead(ChannelHandlerContext ctx, FullHttpMessage msg, boolean release,
@@ -267,6 +268,14 @@ public class InboundHttp2ToHttpAdapter extends Http2EventAdapter {
         Http2Stream stream = connection.stream(streamId);
         FullHttpMessage msg = processHeadersBegin(ctx, stream, headers, endOfStream, true, true);
         if (msg != null) {
+            // Add headers for dependency and weight.
+            // See https://github.com/netty/netty/issues/5866
+            if (streamDependency != Http2CodecUtil.CONNECTION_STREAM_ID) {
+                msg.headers().setInt(HttpConversionUtil.ExtensionHeaderNames.STREAM_DEPENDENCY_ID.text(),
+                        streamDependency);
+            }
+            msg.headers().setShort(HttpConversionUtil.ExtensionHeaderNames.STREAM_WEIGHT.text(), weight);
+
             processHeadersEnd(ctx, stream, msg, endOfStream);
         }
     }
@@ -294,6 +303,8 @@ public class InboundHttp2ToHttpAdapter extends Http2EventAdapter {
         }
 
         msg.headers().setInt(HttpConversionUtil.ExtensionHeaderNames.STREAM_PROMISE_ID.text(), streamId);
+        msg.headers().setShort(HttpConversionUtil.ExtensionHeaderNames.STREAM_WEIGHT.text(),
+                Http2CodecUtil.DEFAULT_PRIORITY_WEIGHT);
 
         processHeadersEnd(ctx, promisedStream, msg, false);
     }

@@ -16,7 +16,8 @@
 package io.netty.util;
 
 import io.netty.util.internal.PlatformDependent;
-import io.netty.util.internal.StringUtil;
+import io.netty.util.internal.SocketUtils;
+import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -26,6 +27,7 @@ import java.io.FileReader;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.net.UnknownHostException;
@@ -118,9 +120,15 @@ public final class NetUtil {
     private static final int IPV4_SEPARATORS = 3;
 
     /**
-     * {@code true} if ipv4 should be used on a system that supports ipv4 and ipv6.
+     * {@code true} if IPv4 should be used even if the system supports both IPv4 and IPv6.
      */
-    private static final boolean IPV4_PREFERRED = Boolean.getBoolean("java.net.preferIPv4Stack");
+    private static final boolean IPV4_PREFERRED = SystemPropertyUtil.getBoolean("java.net.preferIPv4Stack", false);
+
+    /**
+     * {@code true} if an IPv6 address should be preferred when a host has both an IPv4 address and an IPv6 address.
+     */
+    private static final boolean IPV6_ADDRESSES_PREFERRED =
+            SystemPropertyUtil.getBoolean("java.net.preferIPv6Addresses", false);
 
     /**
      * The logger being used by this class
@@ -128,13 +136,16 @@ public final class NetUtil {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(NetUtil.class);
 
     static {
+        logger.debug("-Djava.net.preferIPv4Stack: {}", IPV4_PREFERRED);
+        logger.debug("-Djava.net.preferIPv6Addresses: {}", IPV6_ADDRESSES_PREFERRED);
+
         byte[] LOCALHOST4_BYTES = {127, 0, 0, 1};
         byte[] LOCALHOST6_BYTES = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
 
         // Create IPv4 loopback address.
         Inet4Address localhost4 = null;
         try {
-            localhost4 = (Inet4Address) InetAddress.getByAddress(LOCALHOST4_BYTES);
+            localhost4 = (Inet4Address) InetAddress.getByAddress("localhost", LOCALHOST4_BYTES);
         } catch (Exception e) {
             // We should not get here as long as the length of the address is correct.
             PlatformDependent.throwException(e);
@@ -144,7 +155,7 @@ public final class NetUtil {
         // Create IPv6 loopback address.
         Inet6Address localhost6 = null;
         try {
-            localhost6 = (Inet6Address) InetAddress.getByAddress(LOCALHOST6_BYTES);
+            localhost6 = (Inet6Address) InetAddress.getByAddress("localhost", LOCALHOST6_BYTES);
         } catch (Exception e) {
             // We should not get here as long as the length of the address is correct.
             PlatformDependent.throwException(e);
@@ -154,11 +165,14 @@ public final class NetUtil {
         // Retrieve the list of available network interfaces.
         List<NetworkInterface> ifaces = new ArrayList<NetworkInterface>();
         try {
-            for (Enumeration<NetworkInterface> i = NetworkInterface.getNetworkInterfaces(); i.hasMoreElements();) {
-                NetworkInterface iface = i.nextElement();
-                // Use the interface with proper INET addresses only.
-                if (iface.getInetAddresses().hasMoreElements()) {
-                    ifaces.add(iface);
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            if (interfaces != null) {
+                while (interfaces.hasMoreElements()) {
+                    NetworkInterface iface = interfaces.nextElement();
+                    // Use the interface with proper INET addresses only.
+                    if (SocketUtils.addressesFromNetworkInterface(iface).hasMoreElements()) {
+                        ifaces.add(iface);
+                    }
                 }
             }
         } catch (SocketException e) {
@@ -171,7 +185,7 @@ public final class NetUtil {
         NetworkInterface loopbackIface = null;
         InetAddress loopbackAddr = null;
         loop: for (NetworkInterface iface: ifaces) {
-            for (Enumeration<InetAddress> i = iface.getInetAddresses(); i.hasMoreElements();) {
+            for (Enumeration<InetAddress> i = SocketUtils.addressesFromNetworkInterface(iface); i.hasMoreElements();) {
                 InetAddress addr = i.nextElement();
                 if (addr.isLoopbackAddress()) {
                     // Found
@@ -187,7 +201,7 @@ public final class NetUtil {
             try {
                 for (NetworkInterface iface: ifaces) {
                     if (iface.isLoopback()) {
-                        Enumeration<InetAddress> i = iface.getInetAddresses();
+                        Enumeration<InetAddress> i = SocketUtils.addressesFromNetworkInterface(iface);
                         if (i.hasMoreElements()) {
                             // Found the one with INET address.
                             loopbackIface = iface;
@@ -278,10 +292,25 @@ public final class NetUtil {
     }
 
     /**
-     * Returns {@code true} if ipv4 should be prefered on a system that supports ipv4 and ipv6.
+     * Returns {@code true} if IPv4 should be used even if the system supports both IPv4 and IPv6. Setting this
+     * property to {@code true} will disable IPv6 support. The default value of this property is {@code false}.
+     *
+     * @see <a href="https://docs.oracle.com/javase/8/docs/api/java/net/doc-files/net-properties.html">Java SE
+     *      networking properties</a>
      */
     public static boolean isIpV4StackPreferred() {
         return IPV4_PREFERRED;
+    }
+
+    /**
+     * Returns {@code true} if an IPv6 address should be preferred when a host has both an IPv4 address and an IPv6
+     * address. The default value of this property is {@code false}.
+     *
+     * @see <a href="https://docs.oracle.com/javase/8/docs/api/java/net/doc-files/net-properties.html">Java SE
+     *      networking properties</a>
+     */
+    public static boolean isIpV6AddressesPreferred() {
+        return IPV6_ADDRESSES_PREFERRED;
     }
 
     /**
@@ -483,35 +512,33 @@ public final class NetUtil {
      * @throws IllegalArgumentException
      *         if {@code length} is not {@code 4} nor {@code 16}
      */
+    public static String bytesToIpAddress(byte[] bytes) {
+        return bytesToIpAddress(bytes, 0, bytes.length);
+    }
+
+    /**
+     * Converts 4-byte or 16-byte data into an IPv4 or IPv6 string respectively.
+     *
+     * @throws IllegalArgumentException
+     *         if {@code length} is not {@code 4} nor {@code 16}
+     */
     public static String bytesToIpAddress(byte[] bytes, int offset, int length) {
-        if (length == 4) {
-            StringBuilder buf = new StringBuilder(15);
-
-            buf.append(bytes[offset ++] >> 24 & 0xff);
-            buf.append('.');
-            buf.append(bytes[offset ++] >> 16 & 0xff);
-            buf.append('.');
-            buf.append(bytes[offset ++] >> 8 & 0xff);
-            buf.append('.');
-            buf.append(bytes[offset] & 0xff);
-
-            return buf.toString();
-        }
-
-        if (length == 16) {
-            final StringBuilder sb = new StringBuilder(39);
-            final int endOffset = offset + 14;
-
-            for (; offset < endOffset; offset += 2) {
-                StringUtil.toHexString(sb, bytes, offset, 2);
-                sb.append(':');
+        switch (length) {
+            case 4: {
+                return new StringBuilder(15)
+                        .append(bytes[offset] & 0xff)
+                        .append('.')
+                        .append(bytes[offset + 1] & 0xff)
+                        .append('.')
+                        .append(bytes[offset + 2] & 0xff)
+                        .append('.')
+                        .append(bytes[offset + 3] & 0xff).toString();
             }
-            StringUtil.toHexString(sb, bytes, offset, 2);
-
-            return sb.toString();
+            case 16:
+                return toAddressString(bytes, offset, false);
+            default:
+                throw new IllegalArgumentException("length: " + length + " (expected: 4 or 16)");
         }
-
-        throw new IllegalArgumentException("length: " + length + " (expected: 4 or 16)");
     }
 
     public static boolean isValidIpV6Address(String ipAddress) {
@@ -914,6 +941,51 @@ public final class NetUtil {
     }
 
     /**
+     * Returns the {@link String} representation of an {@link InetSocketAddress}.
+     * <p>
+     * The output does not include Scope ID.
+     * @param addr {@link InetSocketAddress} to be converted to an address string
+     * @return {@code String} containing the text-formatted IP address
+     */
+    public static String toSocketAddressString(InetSocketAddress addr) {
+        String port = String.valueOf(addr.getPort());
+        final StringBuilder sb;
+
+        if (addr.isUnresolved()) {
+            String hostString = PlatformDependent.javaVersion() >= 7 ? addr.getHostString() : addr.getHostName();
+            sb = newSocketAddressStringBuilder(hostString, port, !isValidIpV6Address(hostString));
+        } else {
+            InetAddress address = addr.getAddress();
+            String hostString = toAddressString(address);
+            sb = newSocketAddressStringBuilder(hostString, port, address instanceof Inet4Address);
+        }
+        return sb.append(':').append(port).toString();
+    }
+
+    /**
+     * Returns the {@link String} representation of a host port combo.
+     */
+    public static String toSocketAddressString(String host, int port) {
+        String portStr = String.valueOf(port);
+        return newSocketAddressStringBuilder(
+                host, portStr, !isValidIpV6Address(host)).append(':').append(portStr).toString();
+    }
+
+    private static StringBuilder newSocketAddressStringBuilder(String host, String port, boolean ipv4) {
+        int hostLen = host.length();
+        if (ipv4) {
+            // Need to include enough space for hostString:port.
+            return new StringBuilder(hostLen + 1 + port.length()).append(host);
+        }
+        // Need to include enough space for [hostString]:port.
+        StringBuilder stringBuilder = new StringBuilder(hostLen + 3 + port.length());
+        if (hostLen > 1 && host.charAt(0) == '[' && host.charAt(hostLen - 1) == ']') {
+            return stringBuilder.append(host);
+        }
+        return stringBuilder.append('[').append(host).append(']');
+    }
+
+    /**
      * Returns the {@link String} representation of an {@link InetAddress}.
      * <ul>
      * <li>Inet4Address results are identical to {@link InetAddress#getHostAddress()}</li>
@@ -958,13 +1030,17 @@ public final class NetUtil {
             return ip.getHostAddress();
         }
         if (!(ip instanceof Inet6Address)) {
-            throw new IllegalArgumentException("Unhandled type: " + ip.getClass());
+            throw new IllegalArgumentException("Unhandled type: " + ip);
         }
 
-        final byte[] bytes = ip.getAddress();
+        return toAddressString(ip.getAddress(), 0, ipv4Mapped);
+    }
+
+    private static String toAddressString(byte[] bytes, int offset, boolean ipv4Mapped) {
         final int[] words = new int[IPV6_WORD_COUNT];
         int i;
-        for (i = 0; i < words.length; ++i) {
+        final int end = offset + words.length;
+        for (i = offset; i < end; ++i) {
             words[i] = ((bytes[i << 1] & 0xff) << 8) | (bytes[(i << 1) + 1] & 0xff);
         }
 

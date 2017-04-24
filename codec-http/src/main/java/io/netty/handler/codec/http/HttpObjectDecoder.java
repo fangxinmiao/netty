@@ -21,6 +21,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.codec.DecoderResult;
+import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.codec.TooLongFrameException;
 import io.netty.util.ByteProcessor;
 import io.netty.util.internal.AppendableCharSequence;
@@ -279,7 +280,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             // Keep reading data as a chunk until the end of connection is reached.
             int toRead = Math.min(buffer.readableBytes(), maxChunkSize);
             if (toRead > 0) {
-                ByteBuf content = buffer.readSlice(toRead).retain();
+                ByteBuf content = buffer.readRetainedSlice(toRead);
                 out.add(new DefaultHttpContent(content));
             }
             return;
@@ -301,7 +302,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             if (toRead > chunkSize) {
                 toRead = (int) chunkSize;
             }
-            ByteBuf content = buffer.readSlice(toRead).retain();
+            ByteBuf content = buffer.readRetainedSlice(toRead);
             chunkSize -= toRead;
 
             if (chunkSize == 0) {
@@ -341,7 +342,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             if (toRead == 0) {
                 return;
             }
-            HttpContent chunk = new DefaultHttpContent(buffer.readSlice(toRead).retain());
+            HttpContent chunk = new DefaultHttpContent(buffer.readRetainedSlice(toRead));
             chunkSize -= toRead;
 
             out.add(chunk);
@@ -411,9 +412,19 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             if (currentState == State.READ_VARIABLE_LENGTH_CONTENT && !in.isReadable() && !chunked) {
                 // End of connection.
                 out.add(LastHttpContent.EMPTY_LAST_CONTENT);
-                reset();
+                resetNow();
                 return;
             }
+
+            if (currentState == State.READ_HEADER) {
+                // If we are still in the state of reading headers we need to create a new invalid message that
+                // signals that the connection was closed before we received the headers.
+                out.add(invalidMessage(Unpooled.EMPTY_BUFFER,
+                        new PrematureChannelClosureException("Connection closed before received headers")));
+                resetNow();
+                return;
+            }
+
             // Check if the closure of the connection signifies the end of the content.
             boolean prematureClosure;
             if (isDecodingRequest() || chunked) {
@@ -425,11 +436,11 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
                 // connection, so it is perfectly fine.
                 prematureClosure = contentLength() > 0;
             }
-            resetNow();
 
             if (!prematureClosure) {
                 out.add(LastHttpContent.EMPTY_LAST_CONTENT);
             }
+            resetNow();
         }
     }
 
@@ -498,6 +509,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             }
         }
 
+        resetRequested = false;
         currentState = State.SKIP_CONTROL_CHARS;
     }
 
@@ -562,10 +574,11 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             do {
                 char firstChar = line.charAt(0);
                 if (name != null && (firstChar == ' ' || firstChar == '\t')) {
-                    StringBuilder buf = new StringBuilder(value.length() + line.length() + 1);
+                    String trimmedLine = line.toString().trim();
+                    StringBuilder buf = new StringBuilder(value.length() + trimmedLine.length() + 1);
                     buf.append(value)
                        .append(' ')
-                       .append(line.toString().trim());
+                       .append(trimmedLine);
                     value = buf.toString();
                 } else {
                     if (name != null) {
@@ -792,7 +805,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
 
         @Override
         public boolean process(byte value) throws Exception {
-            char nextByte = (char) value;
+            char nextByte = (char) (value & 0xFF);
             if (nextByte == HttpConstants.CR) {
                 return true;
             }

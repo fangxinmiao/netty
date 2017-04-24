@@ -14,35 +14,6 @@
  */
 package io.netty.handler.codec.http2;
 
-import static io.netty.buffer.Unpooled.EMPTY_BUFFER;
-import static io.netty.buffer.Unpooled.wrappedBuffer;
-import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_PRIORITY_WEIGHT;
-import static io.netty.handler.codec.http2.Http2CodecUtil.emptyPingBuf;
-import static io.netty.handler.codec.http2.Http2Error.PROTOCOL_ERROR;
-import static io.netty.handler.codec.http2.Http2Stream.State.HALF_CLOSED_REMOTE;
-import static io.netty.handler.codec.http2.Http2Stream.State.IDLE;
-import static io.netty.handler.codec.http2.Http2Stream.State.RESERVED_LOCAL;
-import static io.netty.util.CharsetUtil.UTF_8;
-import static org.hamcrest.CoreMatchers.instanceOf;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Matchers.anyLong;
-import static org.mockito.Matchers.anyShort;
-import static org.mockito.Matchers.eq;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doNothing;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
-import static org.mockito.Mockito.when;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
@@ -50,11 +21,10 @@ import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultChannelPromise;
 import io.netty.handler.codec.http2.Http2RemoteFlowController.FlowControlled;
-import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.GenericFutureListener;
 import io.netty.util.concurrent.ImmediateEventExecutor;
 import junit.framework.AssertionFailedError;
 import org.junit.Before;
@@ -67,6 +37,36 @@ import org.mockito.stubbing.Answer;
 
 import java.util.ArrayList;
 import java.util.List;
+
+import static io.netty.buffer.Unpooled.EMPTY_BUFFER;
+import static io.netty.buffer.Unpooled.wrappedBuffer;
+import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_PRIORITY_WEIGHT;
+import static io.netty.handler.codec.http2.Http2CodecUtil.emptyPingBuf;
+import static io.netty.handler.codec.http2.Http2Error.PROTOCOL_ERROR;
+import static io.netty.handler.codec.http2.Http2Stream.State.HALF_CLOSED_REMOTE;
+import static io.netty.handler.codec.http2.Http2Stream.State.RESERVED_LOCAL;
+import static io.netty.handler.codec.http2.Http2TestUtil.newVoidPromise;
+import static io.netty.util.CharsetUtil.UTF_8;
+import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyBoolean;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.anyShort;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 /**
  * Tests for {@link DefaultHttp2ConnectionEncoder}
@@ -85,7 +85,7 @@ public class DefaultHttp2ConnectionEncoderTest {
     private Channel channel;
 
     @Mock
-    private Http2FrameListener listener;
+    private ChannelPipeline pipeline;
 
     @Mock
     private Http2FrameWriter writer;
@@ -111,6 +111,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         MockitoAnnotations.initMocks(this);
 
         when(channel.isActive()).thenReturn(true);
+        when(channel.pipeline()).thenReturn(pipeline);
         when(writer.configuration()).thenReturn(writerConfig);
         when(writerConfig.frameSizePolicy()).thenReturn(frameSizePolicy);
         when(frameSizePolicy.maxFrameSize()).thenReturn(64);
@@ -197,7 +198,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         final ByteBuf data = dummyData();
         ChannelPromise p = newPromise();
         encoder.writeData(ctx, STREAM_ID, data, 0, true, p);
-        assertEquals(payloadCaptor.getValue().size(), 8);
+        assertEquals(8, payloadCaptor.getValue().size());
         payloadCaptor.getValue().write(ctx, 8);
         assertEquals(0, payloadCaptor.getValue().size());
         assertEquals("abcdefgh", writtenData.get(0));
@@ -237,9 +238,9 @@ public class DefaultHttp2ConnectionEncoderTest {
         createStream(STREAM_ID, false);
         final ByteBuf data = dummyData().retain();
 
-        ChannelPromise promise1 = newVoidPromise();
+        ChannelPromise promise1 = newVoidPromise(channel);
         encoder.writeData(ctx, STREAM_ID, data, 0, true, promise1);
-        ChannelPromise promise2 = newVoidPromise();
+        ChannelPromise promise2 = newVoidPromise(channel);
         encoder.writeData(ctx, STREAM_ID, data, 0, true, promise2);
 
         // Now merge the two payloads.
@@ -279,12 +280,35 @@ public class DefaultHttp2ConnectionEncoderTest {
         assertEquals(0, data.refCnt());
     }
 
+    @Test
+    public void writeHeadersUsingVoidPromise() throws Exception {
+        final Throwable cause = new RuntimeException("fake exception");
+        when(writer.writeHeaders(eq(ctx), eq(STREAM_ID), any(Http2Headers.class), anyInt(), anyShort(), anyBoolean(),
+                                 anyInt(), anyBoolean(), any(ChannelPromise.class)))
+                .then(new Answer<ChannelFuture>() {
+                    @Override
+                    public ChannelFuture answer(InvocationOnMock invocationOnMock) throws Throwable {
+                        ChannelPromise promise = invocationOnMock.getArgument(8);
+                        assertFalse(promise.isVoid());
+                        return promise.setFailure(cause);
+                    }
+                });
+        createStream(STREAM_ID, false);
+        // END_STREAM flag, so that a listener is added to the future.
+        encoder.writeHeaders(ctx, STREAM_ID, EmptyHttp2Headers.INSTANCE, 0, true, newVoidPromise(channel));
+
+        verify(writer).writeHeaders(eq(ctx), eq(STREAM_ID), any(Http2Headers.class), anyInt(), anyShort(), anyBoolean(),
+                                    anyInt(), anyBoolean(), any(ChannelPromise.class));
+        // When using a void promise, the error should be propagated via the channel pipeline.
+        verify(pipeline).fireExceptionCaught(cause);
+    }
+
     private void assertSplitPaddingOnEmptyBuffer(ByteBuf data) throws Exception {
         createStream(STREAM_ID, false);
         when(frameSizePolicy.maxFrameSize()).thenReturn(5);
         ChannelPromise p = newPromise();
         encoder.writeData(ctx, STREAM_ID, data, 10, true, p);
-        assertEquals(payloadCaptor.getValue().size(), 10);
+        assertEquals(10, payloadCaptor.getValue().size());
         payloadCaptor.getValue().write(ctx, 10);
         // writer was called 2 times
         assertEquals(1, writtenData.size());
@@ -353,10 +377,9 @@ public class DefaultHttp2ConnectionEncoderTest {
         short weight = 255;
         encoder.writePriority(ctx, STREAM_ID, 0, weight, true, promise);
 
-        // Verify that this created an idle stream with the desired weight.
+        // Verify that this did NOT create a stream object.
         Http2Stream stream = stream(STREAM_ID);
-        assertEquals(IDLE, stream.state());
-        assertEquals(weight, stream.weight());
+        assertNull(stream);
 
         verify(writer).writePriority(eq(ctx), eq(STREAM_ID), eq(0), eq((short) 255), eq(true), eq(promise));
     }
@@ -399,7 +422,7 @@ public class DefaultHttp2ConnectionEncoderTest {
         stream(STREAM_ID);
         ChannelPromise promise = newPromise();
         encoder.writeRstStream(ctx, STREAM_ID, PROTOCOL_ERROR.code(), promise);
-        verify(lifecycleManager).resetStream(eq(ctx), eq(STREAM_ID), anyInt(), eq(promise));
+        verify(lifecycleManager).resetStream(eq(ctx), eq(STREAM_ID), anyLong(), eq(promise));
     }
 
     @Test
@@ -581,27 +604,6 @@ public class DefaultHttp2ConnectionEncoderTest {
 
     private ChannelPromise newPromise() {
         return new DefaultChannelPromise(channel, ImmediateEventExecutor.INSTANCE);
-    }
-
-    private ChannelPromise newVoidPromise() {
-        return new DefaultChannelPromise(channel, ImmediateEventExecutor.INSTANCE) {
-            @Override
-            public ChannelPromise addListener(
-                    GenericFutureListener<? extends Future<? super Void>> listener) {
-                throw new AssertionFailedError();
-            }
-
-            @Override
-            public ChannelPromise addListeners(
-                    GenericFutureListener<? extends Future<? super Void>>... listeners) {
-                throw new AssertionFailedError();
-            }
-
-            @Override
-            public boolean isVoid() {
-                return true;
-            }
-        };
     }
 
     private ChannelFuture newSucceededFuture() {

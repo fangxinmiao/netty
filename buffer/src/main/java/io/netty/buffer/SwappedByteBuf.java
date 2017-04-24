@@ -69,7 +69,7 @@ public class SwappedByteBuf extends ByteBuf {
 
     @Override
     public ByteBuf unwrap() {
-        return buf.unwrap();
+        return buf;
     }
 
     @Override
@@ -632,6 +632,11 @@ public class SwappedByteBuf extends ByteBuf {
     }
 
     @Override
+    public ByteBuf readRetainedSlice(int length) {
+        return buf.readRetainedSlice(length).order(order);
+    }
+
+    @Override
     public ByteBuf readBytes(ByteBuf dst) {
         buf.readBytes(dst);
         return this;
@@ -890,13 +895,28 @@ public class SwappedByteBuf extends ByteBuf {
     }
 
     @Override
+    public ByteBuf retainedSlice() {
+        return buf.retainedSlice().order(order);
+    }
+
+    @Override
     public ByteBuf slice(int index, int length) {
         return buf.slice(index, length).order(order);
     }
 
     @Override
+    public ByteBuf retainedSlice(int index, int length) {
+        return buf.retainedSlice(index, length).order(order);
+    }
+
+    @Override
     public ByteBuf duplicate() {
         return buf.duplicate().order(order);
+    }
+
+    @Override
+    public ByteBuf retainedDuplicate() {
+        return buf.retainedDuplicate().order(order);
     }
 
     @Override

@@ -16,9 +16,11 @@
 package io.netty.handler.codec.http;
 
 import io.netty.util.CharsetUtil;
+import io.netty.util.ReferenceCountUtil;
 import org.junit.Test;
 
-import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import static io.netty.handler.codec.http.HttpHeadersTestUtils.of;
@@ -57,10 +59,10 @@ public class HttpUtilTest {
     public void testGetCharsetAsRawString() {
         HttpMessage message = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
         message.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/html; charset=\"utf8\"");
-        assertEquals("\"utf8\"", HttpUtil.getCharsetAsString(message));
+        assertEquals("\"utf8\"", HttpUtil.getCharsetAsSequence(message));
 
         message.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/html");
-        assertNull(HttpUtil.getCharsetAsString(message));
+        assertNull(HttpUtil.getCharsetAsSequence(message));
     }
 
     @Test
@@ -80,13 +82,13 @@ public class HttpUtilTest {
         assertEquals(CharsetUtil.ISO_8859_1, HttpUtil.getCharset(message));
 
         message.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/html");
-        assertEquals(CharsetUtil.UTF_8, HttpUtil.getCharset(message, StandardCharsets.UTF_8));
+        assertEquals(CharsetUtil.UTF_8, HttpUtil.getCharset(message, CharsetUtil.UTF_8));
 
         message.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/html; charset=UTFFF");
         assertEquals(CharsetUtil.ISO_8859_1, HttpUtil.getCharset(message));
 
         message.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/html; charset=UTFFF");
-        assertEquals(CharsetUtil.UTF_8, HttpUtil.getCharset(message, StandardCharsets.UTF_8));
+        assertEquals(CharsetUtil.UTF_8, HttpUtil.getCharset(message, CharsetUtil.UTF_8));
     }
 
     @Test
@@ -100,4 +102,100 @@ public class HttpUtilTest {
         message.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/html; charset=utf-8");
         assertEquals("text/html", HttpUtil.getMimeType(message));
     }
+
+    @Test
+    public void testGetContentLengthDefaultValue() {
+        HttpMessage message = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+        assertNull(message.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+        message.headers().set(HttpHeaderNames.CONTENT_LENGTH, "bar");
+        assertEquals("bar", message.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+        assertEquals(1L, HttpUtil.getContentLength(message, 1L));
+    }
+
+    @Test
+    public void testDoubleChunkedHeader() {
+        HttpMessage message = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+        message.headers().add(HttpHeaderNames.TRANSFER_ENCODING, "chunked");
+        HttpUtil.setTransferEncodingChunked(message, true);
+        List<String> expected = Collections.singletonList("chunked");
+        assertEquals(expected, message.headers().getAll(HttpHeaderNames.TRANSFER_ENCODING));
+    }
+
+    private static List<String> allPossibleCasesOfContinue() {
+        final List<String> cases = new ArrayList<String>();
+        final String c = "continue";
+        for (int i = 0; i < Math.pow(2, c.length()); i++) {
+            final StringBuilder sb = new StringBuilder(c.length());
+            int j = i;
+            int k = 0;
+            while (j > 0) {
+                if ((j & 1) == 1) {
+                    sb.append(Character.toUpperCase(c.charAt(k++)));
+                } else {
+                    sb.append(c.charAt(k++));
+                }
+                j >>= 1;
+            }
+            for (; k < c.length(); k++) {
+                sb.append(c.charAt(k));
+            }
+            cases.add(sb.toString());
+        }
+        return cases;
+    }
+
+    @Test
+    public void testIs100Continue() {
+        // test all possible cases of 100-continue
+        for (final String continueCase : allPossibleCasesOfContinue()) {
+            run100ContinueTest(HttpVersion.HTTP_1_1, "100-" + continueCase, true);
+        }
+        run100ContinueTest(HttpVersion.HTTP_1_1, null, false);
+        run100ContinueTest(HttpVersion.HTTP_1_1, "chocolate=yummy", false);
+        run100ContinueTest(HttpVersion.HTTP_1_0, "100-continue", false);
+        final HttpMessage message = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+        message.headers().set(HttpHeaderNames.EXPECT, "100-continue");
+        run100ContinueTest(message, false);
+    }
+
+    private void run100ContinueTest(final HttpVersion version, final String expectations, boolean expect) {
+        final HttpMessage message = new DefaultFullHttpRequest(version, HttpMethod.GET, "/");
+        if (expectations != null) {
+            message.headers().set(HttpHeaderNames.EXPECT, expectations);
+        }
+        run100ContinueTest(message, expect);
+    }
+
+    private void run100ContinueTest(final HttpMessage message, final boolean expected) {
+        assertEquals(expected, HttpUtil.is100ContinueExpected(message));
+        ReferenceCountUtil.release(message);
+    }
+
+    @Test
+    public void testContainsUnsupportedExpectation() {
+        // test all possible cases of 100-continue
+        for (final String continueCase : allPossibleCasesOfContinue()) {
+            runUnsupportedExpectationTest(HttpVersion.HTTP_1_1, "100-" + continueCase, false);
+        }
+        runUnsupportedExpectationTest(HttpVersion.HTTP_1_1, null, false);
+        runUnsupportedExpectationTest(HttpVersion.HTTP_1_1, "chocolate=yummy", true);
+        runUnsupportedExpectationTest(HttpVersion.HTTP_1_0, "100-continue", false);
+        final HttpMessage message = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+        message.headers().set("Expect", "100-continue");
+        runUnsupportedExpectationTest(message, false);
+    }
+
+    private void runUnsupportedExpectationTest(final HttpVersion version, final String expectations, boolean expect) {
+        final HttpMessage message = new DefaultFullHttpRequest(version, HttpMethod.GET, "/");
+        if (expectations != null) {
+            message.headers().set("Expect", expectations);
+        }
+        runUnsupportedExpectationTest(message, expect);
+    }
+
+    private void runUnsupportedExpectationTest(final HttpMessage message, final boolean expected) {
+        assertEquals(expected, HttpUtil.isUnsupportedExpectation(message));
+        ReferenceCountUtil.release(message);
+    }
+
 }

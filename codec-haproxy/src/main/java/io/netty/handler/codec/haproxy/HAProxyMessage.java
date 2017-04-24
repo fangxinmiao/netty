@@ -20,7 +20,6 @@ import io.netty.handler.codec.haproxy.HAProxyProxiedProtocol.AddressFamily;
 import io.netty.util.ByteProcessor;
 import io.netty.util.CharsetUtil;
 import io.netty.util.NetUtil;
-import io.netty.util.internal.StringUtil;
 
 /**
  * Message container for decoded HAProxy proxy protocol parameters
@@ -183,6 +182,9 @@ public final class HAProxyMessage {
                 addressLen = addressEnd - startIdx;
             }
             dstAddress = header.toString(startIdx, addressLen, CharsetUtil.US_ASCII);
+            // AF_UNIX defines that exactly 108 bytes are reserved for the address. The previous methods
+            // did not increase the reader index although we already consumed the information.
+            header.readerIndex(startIdx + 108);
         } else {
             if (addressFamily == AddressFamily.AF_IPv4) {
                 // IPv4 requires 12 bytes for address information
@@ -202,12 +204,12 @@ public final class HAProxyMessage {
                 addressLen = 16;
             } else {
                 throw new HAProxyProtocolException(
-                    "unable to parse address information (unkown address family: " + addressFamily + ')');
+                    "unable to parse address information (unknown address family: " + addressFamily + ')');
             }
 
             // Per spec, the src address begins at the 17th byte
-            srcAddress = ipBytestoString(header, addressLen);
-            dstAddress = ipBytestoString(header, addressLen);
+            srcAddress = ipBytesToString(header, addressLen);
+            dstAddress = ipBytesToString(header, addressLen);
             srcPort = header.readUnsignedShort();
             dstPort = header.readUnsignedShort();
         }
@@ -227,7 +229,7 @@ public final class HAProxyMessage {
             throw new HAProxyProtocolException("header");
         }
 
-        String[] parts = StringUtil.split(header, ' ');
+        String[] parts = header.split(" ");
         int numParts = parts.length;
 
         if (numParts < 2) {
@@ -272,7 +274,7 @@ public final class HAProxyMessage {
      * @param addressLen number of bytes to read (4 bytes for IPv4, 16 bytes for IPv6)
      * @return           string representation of the ip address
      */
-    private static String ipBytestoString(ByteBuf header, int addressLen) {
+    private static String ipBytesToString(ByteBuf header, int addressLen) {
         StringBuilder sb = new StringBuilder();
         if (addressLen == 4) {
             sb.append(header.readByte() & 0xff);

@@ -20,7 +20,6 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.base64.Base64;
 import io.netty.handler.codec.http.FullHttpRequest;
-import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpServerUpgradeHandler;
 import io.netty.util.CharsetUtil;
@@ -69,10 +68,10 @@ public class Http2ServerUpgradeCodec implements HttpServerUpgradeHandler.Upgrade
      * Creates the codec using a default name for the connection handler when adding to the
      * pipeline.
      *
-     * @param multiplexCodec the HTTP/2 multiplexing handler.
+     * @param http2Codec the HTTP/2 multiplexing handler.
      */
-    public Http2ServerUpgradeCodec(Http2MultiplexCodec multiplexCodec) {
-        this(null, multiplexCodec);
+    public Http2ServerUpgradeCodec(Http2Codec http2Codec) {
+        this(null, http2Codec);
     }
 
     /**
@@ -90,10 +89,10 @@ public class Http2ServerUpgradeCodec implements HttpServerUpgradeHandler.Upgrade
      * Creates the codec providing an upgrade to the given handler for HTTP/2.
      *
      * @param handlerName the name of the HTTP/2 connection handler to be used in the pipeline.
-     * @param multiplexCodec the HTTP/2 multiplexing handler.
+     * @param http2Codec the HTTP/2 multiplexing handler.
      */
-    public Http2ServerUpgradeCodec(String handlerName, Http2MultiplexCodec multiplexCodec) {
-        this(handlerName, multiplexCodec.connectionHandler(), multiplexCodec);
+    public Http2ServerUpgradeCodec(String handlerName, Http2Codec http2Codec) {
+        this(handlerName, http2Codec.frameCodec().connectionHandler(), http2Codec);
     }
 
     Http2ServerUpgradeCodec(String handlerName, Http2ConnectionHandler connectionHandler,

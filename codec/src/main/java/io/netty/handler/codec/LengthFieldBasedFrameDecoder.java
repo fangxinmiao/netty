@@ -467,8 +467,7 @@ public class LengthFieldBasedFrameDecoder extends ByteToMessageDecoder {
             long tooLongFrameLength = this.tooLongFrameLength;
             this.tooLongFrameLength = 0;
             discardingTooLongFrame = false;
-            if (!failFast ||
-                failFast && firstDetectionOfTooLongFrame) {
+            if (!failFast || firstDetectionOfTooLongFrame) {
                 fail(tooLongFrameLength);
             }
         } else {
@@ -491,7 +490,7 @@ public class LengthFieldBasedFrameDecoder extends ByteToMessageDecoder {
      * is overridden to avoid memory copy.
      */
     protected ByteBuf extractFrame(ChannelHandlerContext ctx, ByteBuf buffer, int index, int length) {
-        return buffer.slice(index, length).retain();
+        return buffer.retainedSlice(index, length);
     }
 
     private void fail(long frameLength) {

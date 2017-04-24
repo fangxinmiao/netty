@@ -20,8 +20,6 @@ import io.netty.buffer.ByteBufUtil;
 import io.netty.util.AsciiString;
 import io.netty.util.CharsetUtil;
 
-import static io.netty.handler.codec.http.HttpConstants.CR;
-import static io.netty.handler.codec.http.HttpConstants.LF;
 import static io.netty.handler.codec.http.HttpConstants.SP;
 
 /**
@@ -31,7 +29,6 @@ import static io.netty.handler.codec.http.HttpConstants.SP;
 public class HttpRequestEncoder extends HttpObjectEncoder<HttpRequest> {
     private static final char SLASH = '/';
     private static final char QUESTION_MARK = '?';
-    private static final byte[] CRLF = { CR, LF };
 
     @Override
     public boolean acceptOutboundMessage(Object msg) throws Exception {
@@ -48,7 +45,7 @@ public class HttpRequestEncoder extends HttpObjectEncoder<HttpRequest> {
         // See http://tools.ietf.org/html/rfc2616#section-5.1.2
         String uri = request.uri();
 
-        if (uri.length() == 0) {
+        if (uri.isEmpty()) {
             uri += SLASH;
         } else {
             int start = uri.indexOf("://");

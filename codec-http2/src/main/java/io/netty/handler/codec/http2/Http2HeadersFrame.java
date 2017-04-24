@@ -22,8 +22,6 @@ import io.netty.util.internal.UnstableApi;
  */
 @UnstableApi
 public interface Http2HeadersFrame extends Http2StreamFrame {
-    @Override
-    Http2HeadersFrame setStream(Object stream);
 
     /**
      * A complete header list. CONTINUATION frames are automatically handled.

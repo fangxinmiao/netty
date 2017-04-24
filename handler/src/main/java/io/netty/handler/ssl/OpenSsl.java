@@ -17,16 +17,20 @@
 package io.netty.handler.ssl;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.handler.ssl.util.SelfSignedCertificate;
+import io.netty.util.ReferenceCountUtil;
+import io.netty.util.ReferenceCounted;
 import io.netty.util.internal.NativeLibraryLoader;
 import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
-import org.apache.tomcat.jni.Buffer;
-import org.apache.tomcat.jni.Library;
-import org.apache.tomcat.jni.Pool;
-import org.apache.tomcat.jni.SSL;
-import org.apache.tomcat.jni.SSLContext;
+import io.netty.internal.tcnative.Buffer;
+import io.netty.internal.tcnative.Library;
+import io.netty.internal.tcnative.SSL;
+import io.netty.internal.tcnative.SSLContext;
 
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Locale;
@@ -43,14 +47,29 @@ public final class OpenSsl {
     private static final String UNKNOWN = "unknown";
     private static final Throwable UNAVAILABILITY_CAUSE;
 
-    private static final Set<String> AVAILABLE_CIPHER_SUITES;
+    static final Set<String> AVAILABLE_CIPHER_SUITES;
+    private static final Set<String> AVAILABLE_OPENSSL_CIPHER_SUITES;
+    private static final Set<String> AVAILABLE_JAVA_CIPHER_SUITES;
+    private static final boolean SUPPORTS_KEYMANAGER_FACTORY;
+    private static final boolean SUPPORTS_HOSTNAME_VALIDATION;
+    private static final boolean USE_KEYMANAGER_FACTORY;
+
+    // Protocols
+    static final String PROTOCOL_SSL_V2_HELLO = "SSLv2Hello";
+    static final String PROTOCOL_SSL_V2 = "SSLv2";
+    static final String PROTOCOL_SSL_V3 = "SSLv3";
+    static final String PROTOCOL_TLS_V1 = "TLSv1";
+    static final String PROTOCOL_TLS_V1_1 = "TLSv1.1";
+    static final String PROTOCOL_TLS_V1_2 = "TLSv1.2";
+
+    static final Set<String> SUPPORTED_PROTOCOLS_SET;
 
     static {
         Throwable cause = null;
 
         // Test if netty-tcnative is in the classpath first.
         try {
-            Class.forName("org.apache.tomcat.jni.SSL", false, OpenSsl.class.getClassLoader());
+            Class.forName("io.netty.internal.tcnative.SSL", false, OpenSsl.class.getClassLoader());
         } catch (ClassNotFoundException t) {
             cause = t;
             logger.debug(
@@ -93,37 +112,133 @@ public final class OpenSsl {
         UNAVAILABILITY_CAUSE = cause;
 
         if (cause == null) {
-            final Set<String> availableCipherSuites = new LinkedHashSet<String>(128);
-            final long aprPool = Pool.create(0);
+            logger.debug("netty-tcnative using native library: {}", SSL.versionString());
+
+            final Set<String> availableOpenSslCipherSuites = new LinkedHashSet<String>(128);
+            boolean supportsKeyManagerFactory = false;
+            boolean useKeyManagerFactory = false;
+            boolean supportsHostNameValidation = false;
             try {
-                final long sslCtx = SSLContext.make(aprPool, SSL.SSL_PROTOCOL_ALL, SSL.SSL_MODE_SERVER);
+                final long sslCtx = SSLContext.make(SSL.SSL_PROTOCOL_ALL, SSL.SSL_MODE_SERVER);
+                long privateKeyBio = 0;
+                long certBio = 0;
                 try {
-                    SSLContext.setOptions(sslCtx, SSL.SSL_OP_ALL);
                     SSLContext.setCipherSuite(sslCtx, "ALL");
                     final long ssl = SSL.newSSL(sslCtx, true);
                     try {
                         for (String c: SSL.getCiphers(ssl)) {
                             // Filter out bad input.
-                            if (c == null || c.length() == 0 || availableCipherSuites.contains(c)) {
+                            if (c == null || c.isEmpty() || availableOpenSslCipherSuites.contains(c)) {
                                 continue;
                             }
-                            availableCipherSuites.add(c);
+                            availableOpenSslCipherSuites.add(c);
+                        }
+                        try {
+                            SSL.setHostNameValidation(ssl, 0, "netty.io");
+                            supportsHostNameValidation = true;
+                        } catch (Throwable ignore) {
+                            logger.debug("Hostname Verification not supported.");
+                        }
+                        try {
+                            SelfSignedCertificate cert = new SelfSignedCertificate();
+                            certBio = ReferenceCountedOpenSslContext.toBIO(cert.cert());
+                            SSL.setCertificateChainBio(ssl, certBio, false);
+                            supportsKeyManagerFactory = true;
+                            try {
+                                useKeyManagerFactory = AccessController.doPrivileged(new PrivilegedAction<Boolean>() {
+                                    @Override
+                                    public Boolean run() {
+                                        return SystemPropertyUtil.getBoolean(
+                                                "io.netty.handler.ssl.openssl.useKeyManagerFactory", true);
+                                    }
+                                });
+                            } catch (Throwable ignore) {
+                                logger.debug("Failed to get useKeyManagerFactory system property.");
+                            }
+                        } catch (Throwable ignore) {
+                            logger.debug("KeyManagerFactory not supported.");
                         }
                     } finally {
                         SSL.freeSSL(ssl);
+                        if (privateKeyBio != 0) {
+                            SSL.freeBIO(privateKeyBio);
+                        }
+                        if (certBio != 0) {
+                            SSL.freeBIO(certBio);
+                        }
                     }
                 } finally {
                     SSLContext.free(sslCtx);
                 }
             } catch (Exception e) {
                 logger.warn("Failed to get the list of available OpenSSL cipher suites.", e);
-            } finally {
-                Pool.destroy(aprPool);
+            }
+            AVAILABLE_OPENSSL_CIPHER_SUITES = Collections.unmodifiableSet(availableOpenSslCipherSuites);
+
+            final Set<String> availableJavaCipherSuites = new LinkedHashSet<String>(
+                    AVAILABLE_OPENSSL_CIPHER_SUITES.size() * 2);
+            for (String cipher: AVAILABLE_OPENSSL_CIPHER_SUITES) {
+                // Included converted but also openssl cipher name
+                availableJavaCipherSuites.add(CipherSuiteConverter.toJava(cipher, "TLS"));
+                availableJavaCipherSuites.add(CipherSuiteConverter.toJava(cipher, "SSL"));
+            }
+            AVAILABLE_JAVA_CIPHER_SUITES = Collections.unmodifiableSet(availableJavaCipherSuites);
+
+            final Set<String> availableCipherSuites = new LinkedHashSet<String>(
+                    AVAILABLE_OPENSSL_CIPHER_SUITES.size() + AVAILABLE_JAVA_CIPHER_SUITES.size());
+            for (String cipher: AVAILABLE_OPENSSL_CIPHER_SUITES) {
+                availableCipherSuites.add(cipher);
+            }
+            for (String cipher: AVAILABLE_JAVA_CIPHER_SUITES) {
+                availableCipherSuites.add(cipher);
+            }
+            AVAILABLE_CIPHER_SUITES = availableCipherSuites;
+            SUPPORTS_KEYMANAGER_FACTORY = supportsKeyManagerFactory;
+            SUPPORTS_HOSTNAME_VALIDATION = supportsHostNameValidation;
+            USE_KEYMANAGER_FACTORY = useKeyManagerFactory;
+
+            Set<String> protocols = new LinkedHashSet<String>(6);
+            // Seems like there is no way to explicitly disable SSLv2Hello in openssl so it is always enabled
+            protocols.add(PROTOCOL_SSL_V2_HELLO);
+            if (doesSupportProtocol(SSL.SSL_PROTOCOL_SSLV2)) {
+                protocols.add(PROTOCOL_SSL_V2);
+            }
+            if (doesSupportProtocol(SSL.SSL_PROTOCOL_SSLV3)) {
+                protocols.add(PROTOCOL_SSL_V3);
+            }
+            if (doesSupportProtocol(SSL.SSL_PROTOCOL_TLSV1)) {
+                protocols.add(PROTOCOL_TLS_V1);
+            }
+            if (doesSupportProtocol(SSL.SSL_PROTOCOL_TLSV1_1)) {
+                protocols.add(PROTOCOL_TLS_V1_1);
+            }
+            if (doesSupportProtocol(SSL.SSL_PROTOCOL_TLSV1_2)) {
+                protocols.add(PROTOCOL_TLS_V1_2);
             }
 
-            AVAILABLE_CIPHER_SUITES = Collections.unmodifiableSet(availableCipherSuites);
+            SUPPORTED_PROTOCOLS_SET = Collections.unmodifiableSet(protocols);
         } else {
+            AVAILABLE_OPENSSL_CIPHER_SUITES = Collections.emptySet();
+            AVAILABLE_JAVA_CIPHER_SUITES = Collections.emptySet();
             AVAILABLE_CIPHER_SUITES = Collections.emptySet();
+            SUPPORTS_KEYMANAGER_FACTORY = false;
+            SUPPORTS_HOSTNAME_VALIDATION = false;
+            USE_KEYMANAGER_FACTORY = false;
+            SUPPORTED_PROTOCOLS_SET = Collections.emptySet();
+        }
+    }
+
+    private static boolean doesSupportProtocol(int protocol) {
+        long sslCtx = -1;
+        try {
+            sslCtx = SSLContext.make(protocol, SSL.SSL_MODE_COMBINED);
+            return true;
+        } catch (Exception ignore) {
+            return false;
+        } finally {
+            if (sslCtx != -1) {
+                SSLContext.free(sslCtx);
+            }
         }
     }
 
@@ -142,6 +257,13 @@ public final class OpenSsl {
      */
     public static boolean isAlpnSupported() {
         return version() >= 0x10002000L;
+    }
+
+    /**
+     * Returns {@code true} if the used version of OpenSSL supports OCSP stapling.
+     */
+    public static boolean isOcspSupported() {
+      return version() >= 0x10002000L;
     }
 
     /**
@@ -190,11 +312,27 @@ public final class OpenSsl {
     }
 
     /**
+     * @deprecated use {@link #availableOpenSslCipherSuites()}
+     */
+    @Deprecated
+    public static Set<String> availableCipherSuites() {
+        return availableOpenSslCipherSuites();
+    }
+
+    /**
      * Returns all the available OpenSSL cipher suites.
      * Please note that the returned array may include the cipher suites that are insecure or non-functional.
      */
-    public static Set<String> availableCipherSuites() {
-        return AVAILABLE_CIPHER_SUITES;
+    public static Set<String> availableOpenSslCipherSuites() {
+        return AVAILABLE_OPENSSL_CIPHER_SUITES;
+    }
+
+    /**
+     * Returns all the available cipher suites (Java-style).
+     * Please note that the returned array may include the cipher suites that are insecure or non-functional.
+     */
+    public static Set<String> availableJavaCipherSuites() {
+        return AVAILABLE_JAVA_CIPHER_SUITES;
     }
 
     /**
@@ -206,11 +344,26 @@ public final class OpenSsl {
         if (converted != null) {
             cipherSuite = converted;
         }
-        return AVAILABLE_CIPHER_SUITES.contains(cipherSuite);
+        return AVAILABLE_OPENSSL_CIPHER_SUITES.contains(cipherSuite);
     }
 
-    static boolean isError(long errorCode) {
-        return errorCode != SSL.SSL_ERROR_NONE;
+    /**
+     * Returns {@code true} if {@link javax.net.ssl.KeyManagerFactory} is supported when using OpenSSL.
+     */
+    public static boolean supportsKeyManagerFactory() {
+        return SUPPORTS_KEYMANAGER_FACTORY;
+    }
+
+    /**
+     * Returns {@code true} if <a href="https://wiki.openssl.org/index.php/Hostname_validation">Hostname Validation</a>
+     * is supported when using OpenSSL.
+     */
+    public static boolean supportsHostnameValidation() {
+        return SUPPORTS_HOSTNAME_VALIDATION;
+    }
+
+    static boolean useKeyManagerFactory() {
+        return USE_KEYMANAGER_FACTORY;
     }
 
     static long memoryAddress(ByteBuf buf) {
@@ -239,9 +392,8 @@ public final class OpenSsl {
             libNames.toArray(new String[libNames.size()]));
     }
 
-    private static void initializeTcNative() throws Exception {
-        Library.initialize("provided");
-        SSL.initialize(null);
+    private static boolean initializeTcNative() throws Exception {
+        return Library.initialize();
     }
 
     private static String normalizeOs(String value) {
@@ -327,5 +479,11 @@ public final class OpenSsl {
 
     private static String normalize(String value) {
         return value.toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "");
+    }
+
+    static void releaseIfNeeded(ReferenceCounted counted) {
+        if (counted.refCnt() > 0) {
+            ReferenceCountUtil.safeRelease(counted);
+        }
     }
 }

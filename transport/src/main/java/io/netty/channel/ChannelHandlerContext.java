@@ -135,14 +135,6 @@ public interface ChannelHandlerContext extends AttributeMap, ChannelInboundInvok
     EventExecutor executor();
 
     /**
-     * Returns the {@link ChannelHandlerInvoker} which is used to trigger an event for the associated
-     * {@link ChannelHandler}. Note that the methods in {@link ChannelHandlerInvoker} are not intended to be called
-     * by a user. Use this method only to obtain the reference to the {@link ChannelHandlerInvoker}
-     * (and not calling its methods) unless you know what you are doing.
-     */
-    ChannelHandlerInvoker invoker();
-
-    /**
      * The unique name of the {@link ChannelHandlerContext}.The name was used when then {@link ChannelHandler}
      * was added to the {@link ChannelPipeline}. This name can also be used to access the registered
      * {@link ChannelHandler} from the {@link ChannelPipeline}.
@@ -177,7 +169,7 @@ public interface ChannelHandlerContext extends AttributeMap, ChannelInboundInvok
     ChannelHandlerContext fireExceptionCaught(Throwable cause);
 
     @Override
-    ChannelHandlerContext fireUserEventTriggered(Object event);
+    ChannelHandlerContext fireUserEventTriggered(Object evt);
 
     @Override
     ChannelHandlerContext fireChannelRead(Object msg);

@@ -20,7 +20,6 @@ import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.util.internal.EmptyArrays;
 import io.netty.util.concurrent.FastThreadLocal;
-import io.netty.util.internal.InternalThreadLocalMap;
 
 import javax.net.ssl.ManagerFactoryParameters;
 import javax.net.ssl.TrustManager;
@@ -32,6 +31,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -134,7 +134,7 @@ public final class FingerprintTrustManagerFactory extends SimpleTrustManagerFact
     /**
      * Creates a new instance.
      *
-     * @param fingerprints a list of SHA1 fingerprints in heaxdecimal form
+     * @param fingerprints a list of SHA1 fingerprints in hexadecimal form
      */
     public FingerprintTrustManagerFactory(Iterable<String> fingerprints) {
         this(toFingerprintArray(fingerprints));
@@ -143,7 +143,7 @@ public final class FingerprintTrustManagerFactory extends SimpleTrustManagerFact
     /**
      * Creates a new instance.
      *
-     * @param fingerprints a list of SHA1 fingerprints in heaxdecimal form
+     * @param fingerprints a list of SHA1 fingerprints in hexadecimal form
      */
     public FingerprintTrustManagerFactory(String... fingerprints) {
         this(toFingerprintArray(Arrays.asList(fingerprints)));
@@ -159,7 +159,7 @@ public final class FingerprintTrustManagerFactory extends SimpleTrustManagerFact
             throw new NullPointerException("fingerprints");
         }
 
-        List<byte[]> list = InternalThreadLocalMap.get().arrayList();
+        List<byte[]> list = new ArrayList<byte[]>(fingerprints.length);
         for (byte[] f: fingerprints) {
             if (f == null) {
                 break;
@@ -179,7 +179,7 @@ public final class FingerprintTrustManagerFactory extends SimpleTrustManagerFact
             throw new NullPointerException("fingerprints");
         }
 
-        List<byte[]> list = InternalThreadLocalMap.get().arrayList();
+        List<byte[]> list = new ArrayList<byte[]>();
         for (String f: fingerprints) {
             if (f == null) {
                 break;

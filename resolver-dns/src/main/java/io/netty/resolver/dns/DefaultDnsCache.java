@@ -16,7 +16,7 @@
 package io.netty.resolver.dns;
 
 import io.netty.channel.EventLoop;
-import io.netty.util.internal.OneTimeTask;
+import io.netty.handler.codec.dns.DnsRecord;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.UnstableApi;
 
@@ -33,6 +33,7 @@ import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 
 /**
  * Default implementation of {@link DnsCache}, backed by a {@link ConcurrentMap}.
+ * If any additional {@link DnsRecord} is used, no caching takes place.
  */
 @UnstableApi
 public class DefaultDnsCache implements DnsCache {
@@ -116,9 +117,16 @@ public class DefaultDnsCache implements DnsCache {
         return removed;
     }
 
+    private static boolean emptyAdditionals(DnsRecord[] additionals) {
+        return additionals == null || additionals.length == 0;
+    }
+
     @Override
-    public List<DnsCacheEntry> get(String hostname) {
+    public List<DnsCacheEntry> get(String hostname, DnsRecord[] additionals) {
         checkNotNull(hostname, "hostname");
+        if (!emptyAdditionals(additionals)) {
+            return null;
+        }
         return resolveCache.get(hostname);
     }
 
@@ -136,14 +144,14 @@ public class DefaultDnsCache implements DnsCache {
     }
 
     @Override
-    public void cache(String hostname, InetAddress address, long originalTtl, EventLoop loop) {
-        if (maxTtl == 0) {
-            return;
-        }
+    public void cache(String hostname, DnsRecord[] additionals,
+                      InetAddress address, long originalTtl, EventLoop loop) {
         checkNotNull(hostname, "hostname");
         checkNotNull(address, "address");
         checkNotNull(loop, "loop");
-
+        if (maxTtl == 0 || !emptyAdditionals(additionals)) {
+            return;
+        }
         final int ttl = Math.max(minTtl, (int) Math.min(maxTtl, originalTtl));
         final List<DnsCacheEntry> entries = cachedEntries(hostname);
         final DnsCacheEntry e = new DnsCacheEntry(hostname, address);
@@ -164,14 +172,14 @@ public class DefaultDnsCache implements DnsCache {
     }
 
     @Override
-    public void cache(String hostname, Throwable cause, EventLoop loop) {
-        if (negativeTtl == 0) {
-            return;
-        }
+    public void cache(String hostname, DnsRecord[] additionals, Throwable cause, EventLoop loop) {
         checkNotNull(hostname, "hostname");
         checkNotNull(cause, "cause");
         checkNotNull(loop, "loop");
 
+        if (negativeTtl == 0 || !emptyAdditionals(additionals)) {
+            return;
+        }
         final List<DnsCacheEntry> entries = cachedEntries(hostname);
         final DnsCacheEntry e = new DnsCacheEntry(hostname, cause);
 
@@ -198,7 +206,7 @@ public class DefaultDnsCache implements DnsCache {
                                          final DnsCacheEntry e,
                                          int ttl,
                                          EventLoop loop) {
-        e.scheduleExpiration(loop, new OneTimeTask() {
+        e.scheduleExpiration(loop, new Runnable() {
                     @Override
                     public void run() {
                         synchronized (entries) {

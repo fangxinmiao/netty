@@ -28,8 +28,8 @@ import io.netty.channel.EventLoop;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.EventExecutor;
-import io.netty.util.internal.EmptyArrays;
-import io.netty.util.internal.OneTimeTask;
+import io.netty.util.internal.ObjectUtil;
+import io.netty.util.internal.ThrowableUtil;
 
 import java.net.SocketAddress;
 import java.nio.channels.ClosedChannelException;
@@ -47,16 +47,13 @@ abstract class AbstractHttp2StreamChannel extends AbstractChannel {
      */
     protected static final Object CLOSE_MESSAGE = new Object();
     private static final ChannelMetadata METADATA = new ChannelMetadata(false, 16);
-    private static final ClosedChannelException CLOSED_CHANNEL_EXCEPTION = new ClosedChannelException();
+    private static final ClosedChannelException CLOSED_CHANNEL_EXCEPTION = ThrowableUtil.unknownStackTrace(
+            new ClosedChannelException(), AbstractHttp2StreamChannel.class, "doWrite(...)");
     /**
      * Number of bytes to consider non-payload messages, to determine when to stop reading. 9 is
      * arbitrary, but also the minimum size of an HTTP/2 frame. Primarily is non-zero.
      */
     private static final int ARBITRARY_MESSAGE_SIZE = 9;
-
-    static {
-        CLOSED_CHANNEL_EXCEPTION.setStackTrace(EmptyArrays.EMPTY_STACK_TRACE);
-    }
 
     private final ChannelConfig config = new DefaultChannelConfig(this);
     private final Queue<Object> inboundBuffer = new ArrayDeque<Object>(4);
@@ -71,10 +68,12 @@ abstract class AbstractHttp2StreamChannel extends AbstractChannel {
         }
     };
 
+    // Volatile, as parent and child channel may be on different eventloops.
+    private volatile int streamId = -1;
     private boolean closed;
     private boolean readInProgress;
 
-    public AbstractHttp2StreamChannel(Channel parent) {
+    protected AbstractHttp2StreamChannel(Channel parent) {
         super(parent);
     }
 
@@ -95,7 +94,7 @@ abstract class AbstractHttp2StreamChannel extends AbstractChannel {
 
     @Override
     public boolean isActive() {
-        return !closed;
+        return isOpen();
     }
 
     @Override
@@ -201,7 +200,7 @@ abstract class AbstractHttp2StreamChannel extends AbstractChannel {
                 in.remove();
             }
 
-            preferredExecutor.execute(new OneTimeTask() {
+            preferredExecutor.execute(new Runnable() {
                 @Override
                 public void run() {
                     for (Object msg : msgsCopy) {
@@ -224,12 +223,12 @@ abstract class AbstractHttp2StreamChannel extends AbstractChannel {
     protected abstract void doWrite(Object msg) throws Exception;
 
     /**
-     * Process end of batch of {@link #doWrite()}s. May be called from any thread.
+     * Process end of batch of {@link #doWrite(ChannelOutboundBuffer)}s. May be called from any thread.
      */
     protected abstract void doWriteComplete();
 
     /**
-     * The ideal thread for events like {@link #doWrite()} to be processed on. May be used for
+     * The ideal thread for events like {@link #doWrite(ChannelOutboundBuffer)} to be processed on. May be used for
      * efficient batching, but not required.
      */
     protected abstract EventExecutor preferredEventExecutor();
@@ -248,7 +247,7 @@ abstract class AbstractHttp2StreamChannel extends AbstractChannel {
         if (eventLoop().inEventLoop()) {
             fireChildRead0(msg);
         } else {
-            eventLoop().execute(new OneTimeTask() {
+            eventLoop().execute(new Runnable() {
                 @Override
                 public void run() {
                     fireChildRead0(msg);
@@ -282,6 +281,20 @@ abstract class AbstractHttp2StreamChannel extends AbstractChannel {
         } else {
             eventLoop().execute(fireChildReadCompleteTask);
         }
+    }
+
+    /**
+     * This method must only be called within the parent channel's eventloop.
+     */
+    protected void streamId(int streamId) {
+        if (this.streamId != -1) {
+            throw new IllegalStateException("Stream identifier may only be set once.");
+        }
+        this.streamId = ObjectUtil.checkPositiveOrZero(streamId, "streamId");
+    }
+
+    protected int streamId() {
+        return streamId;
     }
 
     /**

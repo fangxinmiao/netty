@@ -19,12 +19,15 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelConfig;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelMetadata;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.FileRegion;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.socket.ChannelInputShutdownEvent;
+import io.netty.channel.socket.ChannelInputShutdownReadComplete;
 import io.netty.util.internal.StringUtil;
 
 import java.io.IOException;
@@ -35,7 +38,7 @@ import java.nio.channels.SelectionKey;
  * {@link AbstractNioChannel} base class for {@link Channel}s that operate on bytes.
  */
 public abstract class AbstractNioByteChannel extends AbstractNioChannel {
-
+    private static final ChannelMetadata METADATA = new ChannelMetadata(false, 16);
     private static final String EXPECTED_TYPES =
             " (expected: " + StringUtil.simpleClassName(ByteBuf.class) + ", " +
             StringUtil.simpleClassName(FileRegion.class) + ')';
@@ -52,23 +55,37 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
         super(parent, ch, SelectionKey.OP_READ);
     }
 
+    /**
+     * Shutdown the input side of the channel.
+     */
+    protected abstract ChannelFuture shutdownInput();
+
+    protected boolean isInputShutdown0() {
+        return false;
+    }
+
     @Override
     protected AbstractNioUnsafe newUnsafe() {
         return new NioByteUnsafe();
     }
 
+    @Override
+    public ChannelMetadata metadata() {
+        return METADATA;
+    }
+
     protected class NioByteUnsafe extends AbstractNioUnsafe {
 
         private void closeOnRead(ChannelPipeline pipeline) {
-            SelectionKey key = selectionKey();
-            setInputShutdown();
-            if (isOpen()) {
+            if (!isInputShutdown0()) {
                 if (Boolean.TRUE.equals(config().getOption(ChannelOption.ALLOW_HALF_CLOSURE))) {
-                    key.interestOps(key.interestOps() & ~readInterestOp);
+                    shutdownInput();
                     pipeline.fireUserEventTriggered(ChannelInputShutdownEvent.INSTANCE);
                 } else {
                     close(voidPromise());
                 }
+            } else {
+                pipeline.fireUserEventTriggered(ChannelInputShutdownReadComplete.INSTANCE);
             }
         }
 

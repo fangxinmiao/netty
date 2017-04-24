@@ -35,6 +35,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CharsetEncoder;
 import java.nio.charset.CoderResult;
+import java.nio.charset.CodingErrorAction;
 import java.util.Arrays;
 import java.util.Locale;
 
@@ -158,6 +159,22 @@ public final class ByteBufUtil {
     }
 
     /**
+     * Returns the reader index of needle in haystack, or -1 if needle is not in haystack.
+     */
+    public static int indexOf(ByteBuf needle, ByteBuf haystack) {
+        // TODO: maybe use Boyer Moore for efficiency.
+        int attempts = haystack.readableBytes() - needle.readableBytes() + 1;
+        for (int i = 0; i < attempts; i++) {
+            if (equals(needle, needle.readerIndex(),
+                       haystack, haystack.readerIndex() + i,
+                       needle.readableBytes())) {
+                return haystack.readerIndex() + i;
+            }
+        }
+        return -1;
+    }
+
+    /**
      * Returns {@code true} if and only if the two specified buffers are
      * identical to each other for {@code length} bytes starting at {@code aStartIndex}
      * index for the {@code a} buffer and {@code bStartIndex} index for the {@code b} buffer.
@@ -228,52 +245,81 @@ public final class ByteBufUtil {
         final int minLength = Math.min(aLen, bLen);
         final int uintCount = minLength >>> 2;
         final int byteCount = minLength & 3;
-
         int aIndex = bufferA.readerIndex();
         int bIndex = bufferB.readerIndex();
 
-        if (bufferA.order() == bufferB.order()) {
-            for (int i = uintCount; i > 0; i --) {
-                long va = bufferA.getUnsignedInt(aIndex);
-                long vb = bufferB.getUnsignedInt(bIndex);
-                if (va > vb) {
-                    return 1;
-                }
-                if (va < vb) {
-                    return -1;
-                }
-                aIndex += 4;
-                bIndex += 4;
+        if (uintCount > 0) {
+            boolean bufferAIsBigEndian = bufferA.order() == ByteOrder.BIG_ENDIAN;
+            final long res;
+            int uintCountIncrement = uintCount << 2;
+
+            if (bufferA.order() == bufferB.order()) {
+                res = bufferAIsBigEndian ? compareUintBigEndian(bufferA, bufferB, aIndex, bIndex, uintCountIncrement) :
+                        compareUintLittleEndian(bufferA, bufferB, aIndex, bIndex, uintCountIncrement);
+            } else {
+                res = bufferAIsBigEndian ? compareUintBigEndianA(bufferA, bufferB, aIndex, bIndex, uintCountIncrement) :
+                        compareUintBigEndianB(bufferA, bufferB, aIndex, bIndex, uintCountIncrement);
             }
-        } else {
-            for (int i = uintCount; i > 0; i --) {
-                long va = bufferA.getUnsignedInt(aIndex);
-                long vb = swapInt(bufferB.getInt(bIndex)) & 0xFFFFFFFFL;
-                if (va > vb) {
-                    return 1;
-                }
-                if (va < vb) {
-                    return -1;
-                }
-                aIndex += 4;
-                bIndex += 4;
+            if (res != 0) {
+                // Ensure we not overflow when cast
+                return (int) Math.min(Integer.MAX_VALUE, Math.max(Integer.MIN_VALUE, res));
             }
+            aIndex += uintCountIncrement;
+            bIndex += uintCountIncrement;
         }
 
-        for (int i = byteCount; i > 0; i --) {
-            short va = bufferA.getUnsignedByte(aIndex);
-            short vb = bufferB.getUnsignedByte(bIndex);
-            if (va > vb) {
-                return 1;
+        for (int aEnd = aIndex + byteCount; aIndex < aEnd; ++aIndex, ++bIndex) {
+            int comp = bufferA.getUnsignedByte(aIndex) - bufferB.getUnsignedByte(bIndex);
+            if (comp != 0) {
+                return comp;
             }
-            if (va < vb) {
-                return -1;
-            }
-            aIndex ++;
-            bIndex ++;
         }
 
         return aLen - bLen;
+    }
+
+    private static long compareUintBigEndian(
+            ByteBuf bufferA, ByteBuf bufferB, int aIndex, int bIndex, int uintCountIncrement) {
+        for (int aEnd = aIndex + uintCountIncrement; aIndex < aEnd; aIndex += 4, bIndex += 4) {
+            long comp = bufferA.getUnsignedInt(aIndex) - bufferB.getUnsignedInt(bIndex);
+            if (comp != 0) {
+                return comp;
+            }
+        }
+        return 0;
+    }
+
+    private static long compareUintLittleEndian(
+            ByteBuf bufferA, ByteBuf bufferB, int aIndex, int bIndex, int uintCountIncrement) {
+        for (int aEnd = aIndex + uintCountIncrement; aIndex < aEnd; aIndex += 4, bIndex += 4) {
+            long comp = bufferA.getUnsignedIntLE(aIndex) - bufferB.getUnsignedIntLE(bIndex);
+            if (comp != 0) {
+                return comp;
+            }
+        }
+        return 0;
+    }
+
+    private static long compareUintBigEndianA(
+            ByteBuf bufferA, ByteBuf bufferB, int aIndex, int bIndex, int uintCountIncrement) {
+        for (int aEnd = aIndex + uintCountIncrement; aIndex < aEnd; aIndex += 4, bIndex += 4) {
+            long comp =  bufferA.getUnsignedInt(aIndex) - bufferB.getUnsignedIntLE(bIndex);
+            if (comp != 0) {
+                return comp;
+            }
+        }
+        return 0;
+    }
+
+    private static long compareUintBigEndianB(
+            ByteBuf bufferA, ByteBuf bufferB, int aIndex, int bIndex, int uintCountIncrement) {
+        for (int aEnd = aIndex + uintCountIncrement; aIndex < aEnd; aIndex += 4, bIndex += 4) {
+            long comp =  bufferA.getUnsignedIntLE(aIndex) - bufferB.getUnsignedInt(bIndex);
+            if (comp != 0) {
+                return comp;
+            }
+        }
+        return 0;
     }
 
     /**
@@ -542,7 +588,7 @@ public final class ByteBufUtil {
             dst = alloc.buffer(length);
         }
         try {
-            final ByteBuffer dstBuf = dst.internalNioBuffer(0, length);
+            final ByteBuffer dstBuf = dst.internalNioBuffer(dst.readerIndex(), length);
             final int pos = dstBuf.position();
             CoderResult cr = encoder.encode(src, dstBuf, true);
             if (!cr.isUnderflow()) {
@@ -589,7 +635,7 @@ public final class ByteBufUtil {
             try {
                 buffer.writeBytes(src, readerIndex, len);
                 // Use internalNioBuffer(...) to reduce object creation.
-                decodeString(decoder, buffer.internalNioBuffer(0, len), dst);
+                decodeString(decoder, buffer.internalNioBuffer(buffer.readerIndex(), len), dst);
             } finally {
                 // Release the temporary buffer again.
                 buffer.release();
@@ -937,7 +983,7 @@ public final class ByteBufUtil {
         private static final Recycler<ThreadLocalUnsafeDirectByteBuf> RECYCLER =
                 new Recycler<ThreadLocalUnsafeDirectByteBuf>() {
                     @Override
-                    protected ThreadLocalUnsafeDirectByteBuf newObject(Handle handle) {
+                    protected ThreadLocalUnsafeDirectByteBuf newObject(Handle<ThreadLocalUnsafeDirectByteBuf> handle) {
                         return new ThreadLocalUnsafeDirectByteBuf(handle);
                     }
                 };
@@ -948,9 +994,9 @@ public final class ByteBufUtil {
             return buf;
         }
 
-        private final Handle handle;
+        private final Handle<ThreadLocalUnsafeDirectByteBuf> handle;
 
-        private ThreadLocalUnsafeDirectByteBuf(Handle handle) {
+        private ThreadLocalUnsafeDirectByteBuf(Handle<ThreadLocalUnsafeDirectByteBuf> handle) {
             super(UnpooledByteBufAllocator.DEFAULT, 256, Integer.MAX_VALUE);
             this.handle = handle;
         }
@@ -961,7 +1007,7 @@ public final class ByteBufUtil {
                 super.deallocate();
             } else {
                 clear();
-                RECYCLER.recycle(this, handle);
+                handle.recycle(this);
             }
         }
     }
@@ -970,7 +1016,7 @@ public final class ByteBufUtil {
 
         private static final Recycler<ThreadLocalDirectByteBuf> RECYCLER = new Recycler<ThreadLocalDirectByteBuf>() {
             @Override
-            protected ThreadLocalDirectByteBuf newObject(Handle handle) {
+            protected ThreadLocalDirectByteBuf newObject(Handle<ThreadLocalDirectByteBuf> handle) {
                 return new ThreadLocalDirectByteBuf(handle);
             }
         };
@@ -981,9 +1027,9 @@ public final class ByteBufUtil {
             return buf;
         }
 
-        private final Handle handle;
+        private final Handle<ThreadLocalDirectByteBuf> handle;
 
-        private ThreadLocalDirectByteBuf(Handle handle) {
+        private ThreadLocalDirectByteBuf(Handle<ThreadLocalDirectByteBuf> handle) {
             super(UnpooledByteBufAllocator.DEFAULT, 256, Integer.MAX_VALUE);
             this.handle = handle;
         }
@@ -994,9 +1040,206 @@ public final class ByteBufUtil {
                 super.deallocate();
             } else {
                 clear();
-                RECYCLER.recycle(this, handle);
+                handle.recycle(this);
             }
         }
+    }
+
+    /**
+     * Returns {@code true} if the given {@link ByteBuf} is valid text using the given {@link Charset},
+     * otherwise return {@code false}.
+     *
+     * @param buf The given {@link ByteBuf}.
+     * @param charset The specified {@link Charset}.
+     */
+    public static boolean isText(ByteBuf buf, Charset charset) {
+        return isText(buf, buf.readerIndex(), buf.readableBytes(), charset);
+    }
+
+    /**
+     * Returns {@code true} if the specified {@link ByteBuf} starting at {@code index} with {@code length} is valid
+     * text using the given {@link Charset}, otherwise return {@code false}.
+     *
+     * @param buf The given {@link ByteBuf}.
+     * @param index The start index of the specified buffer.
+     * @param length The length of the specified buffer.
+     * @param charset The specified {@link Charset}.
+     *
+     * @throws IndexOutOfBoundsException if {@code index} + {@code length} is greater than {@code buf.readableBytes}
+     */
+    public static boolean isText(ByteBuf buf, int index, int length, Charset charset) {
+        checkNotNull(buf, "buf");
+        checkNotNull(charset, "charset");
+        final int maxIndex = buf.readerIndex() + buf.readableBytes();
+        if (index < 0 || length < 0 || index > maxIndex - length) {
+            throw new IndexOutOfBoundsException("index: " + index + " length: " + length);
+        }
+        if (charset.equals(CharsetUtil.UTF_8)) {
+            return isUtf8(buf, index, length);
+        } else if (charset.equals(CharsetUtil.US_ASCII)) {
+            return isAscii(buf, index, length);
+        } else {
+            CharsetDecoder decoder = CharsetUtil.decoder(charset, CodingErrorAction.REPORT, CodingErrorAction.REPORT);
+            try {
+                if (buf.nioBufferCount() == 1) {
+                    decoder.decode(buf.internalNioBuffer(index, length));
+                } else {
+                    ByteBuf heapBuffer =  buf.alloc().heapBuffer(length);
+                    try {
+                        heapBuffer.writeBytes(buf, index, length);
+                        decoder.decode(heapBuffer.internalNioBuffer(heapBuffer.readerIndex(), length));
+                    } finally {
+                        heapBuffer.release();
+                    }
+                }
+                return true;
+            } catch (CharacterCodingException ignore) {
+                return false;
+            }
+        }
+    }
+
+    /**
+     * Aborts on a byte which is not a valid ASCII character.
+     */
+    private static final ByteProcessor FIND_NON_ASCII = new ByteProcessor() {
+        @Override
+        public boolean process(byte value) {
+            return value >= 0;
+        }
+    };
+
+    /**
+     * Returns {@code true} if the specified {@link ByteBuf} starting at {@code index} with {@code length} is valid
+     * ASCII text, otherwise return {@code false}.
+     *
+     * @param buf    The given {@link ByteBuf}.
+     * @param index  The start index of the specified buffer.
+     * @param length The length of the specified buffer.
+     */
+    private static boolean isAscii(ByteBuf buf, int index, int length) {
+        return buf.forEachByte(index, length, FIND_NON_ASCII) == -1;
+    }
+
+    /**
+     * Returns {@code true} if the specified {@link ByteBuf} starting at {@code index} with {@code length} is valid
+     * UTF8 text, otherwise return {@code false}.
+     *
+     * @param buf The given {@link ByteBuf}.
+     * @param index The start index of the specified buffer.
+     * @param length The length of the specified buffer.
+     *
+     * @see
+     * <a href=http://www.ietf.org/rfc/rfc3629.txt>UTF-8 Definition</a>
+     *
+     * <pre>
+     * 1. Bytes format of UTF-8
+     *
+     * The table below summarizes the format of these different octet types.
+     * The letter x indicates bits available for encoding bits of the character number.
+     *
+     * Char. number range  |        UTF-8 octet sequence
+     *    (hexadecimal)    |              (binary)
+     * --------------------+---------------------------------------------
+     * 0000 0000-0000 007F | 0xxxxxxx
+     * 0000 0080-0000 07FF | 110xxxxx 10xxxxxx
+     * 0000 0800-0000 FFFF | 1110xxxx 10xxxxxx 10xxxxxx
+     * 0001 0000-0010 FFFF | 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+     * </pre>
+     *
+     * <pre>
+     * 2. Syntax of UTF-8 Byte Sequences
+     *
+     * UTF8-octets = *( UTF8-char )
+     * UTF8-char   = UTF8-1 / UTF8-2 / UTF8-3 / UTF8-4
+     * UTF8-1      = %x00-7F
+     * UTF8-2      = %xC2-DF UTF8-tail
+     * UTF8-3      = %xE0 %xA0-BF UTF8-tail /
+     *               %xE1-EC 2( UTF8-tail ) /
+     *               %xED %x80-9F UTF8-tail /
+     *               %xEE-EF 2( UTF8-tail )
+     * UTF8-4      = %xF0 %x90-BF 2( UTF8-tail ) /
+     *               %xF1-F3 3( UTF8-tail ) /
+     *               %xF4 %x80-8F 2( UTF8-tail )
+     * UTF8-tail   = %x80-BF
+     * </pre>
+     */
+    private static boolean isUtf8(ByteBuf buf, int index, int length) {
+        final int endIndex = index + length;
+        while (index < endIndex) {
+            byte b1 = buf.getByte(index++);
+            byte b2, b3, b4;
+            if ((b1 & 0x80) == 0) {
+                // 1 byte
+                continue;
+            }
+            if ((b1 & 0xE0) == 0xC0) {
+                // 2 bytes
+                //
+                // Bit/Byte pattern
+                // 110xxxxx    10xxxxxx
+                // C2..DF      80..BF
+                if (index >= endIndex) { // no enough bytes
+                    return false;
+                }
+                b2 = buf.getByte(index++);
+                if ((b2 & 0xC0) != 0x80) { // 2nd byte not starts with 10
+                    return false;
+                }
+                if ((b1 & 0xFF) < 0xC2) { // out of lower bound
+                    return false;
+                }
+            } else if ((b1 & 0xF0) == 0xE0) {
+                // 3 bytes
+                //
+                // Bit/Byte pattern
+                // 1110xxxx    10xxxxxx    10xxxxxx
+                // E0          A0..BF      80..BF
+                // E1..EC      80..BF      80..BF
+                // ED          80..9F      80..BF
+                // E1..EF      80..BF      80..BF
+                if (index > endIndex - 2) { // no enough bytes
+                    return false;
+                }
+                b2 = buf.getByte(index++);
+                b3 = buf.getByte(index++);
+                if ((b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) { // 2nd or 3rd bytes not start with 10
+                    return false;
+                }
+                if ((b1 & 0x0F) == 0x00 && (b2 & 0xFF) < 0xA0) { // out of lower bound
+                    return false;
+                }
+                if ((b1 & 0x0F) == 0x0D && (b2 & 0xFF) > 0x9F) { // out of upper bound
+                    return false;
+                }
+            } else if ((b1 & 0xF8) == 0xF0) {
+                // 4 bytes
+                //
+                // Bit/Byte pattern
+                // 11110xxx    10xxxxxx    10xxxxxx    10xxxxxx
+                // F0          90..BF      80..BF      80..BF
+                // F1..F3      80..BF      80..BF      80..BF
+                // F4          80..8F      80..BF      80..BF
+                if (index > endIndex - 3) { // no enough bytes
+                    return false;
+                }
+                b2 = buf.getByte(index++);
+                b3 = buf.getByte(index++);
+                b4 = buf.getByte(index++);
+                if ((b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80 || (b4 & 0xC0) != 0x80) {
+                    // 2nd, 3rd or 4th bytes not start with 10
+                    return false;
+                }
+                if ((b1 & 0xFF) > 0xF4 // b1 invalid
+                        || (b1 & 0xFF) == 0xF0 && (b2 & 0xFF) < 0x90    // b2 out of lower bound
+                        || (b1 & 0xFF) == 0xF4 && (b2 & 0xFF) > 0x8F) { // b2 out of upper bound
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        return true;
     }
 
     private ByteBufUtil() { }

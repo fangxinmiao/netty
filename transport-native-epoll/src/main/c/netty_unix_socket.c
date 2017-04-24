@@ -13,6 +13,12 @@
  * License for the specific language governing permissions and limitations
  * under the License.
  */
+ /* 
+ * Since glibc 2.8, the _GNU_SOURCE feature test macro must be defined
+ * (before including any header files) in order to obtain the
+ * definition of this structure. See <a href=https://linux.die.net/man/7/unix>
+ */
+#define _GNU_SOURCE
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
@@ -29,8 +35,10 @@
 #include "netty_unix_util.h"
 
 static jclass datagramSocketAddressClass = NULL;
+static jclass peerCredentialsClass = NULL;
 static jmethodID datagramSocketAddrMethodId = NULL;
 static jmethodID inetSocketAddrMethodId = NULL;
+static jmethodID peerCredentialsMethodId = NULL;
 static jclass inetSocketAddressClass = NULL;
 static jclass netUtilClass = NULL;
 static jmethodID netUtilClassIpv4PreferredMethodId = NULL;
@@ -145,34 +153,6 @@ static jbyteArray createInetSocketAddressArray(JNIEnv* env, const struct sockadd
 
     initInetSocketAddressArray(env, addr, bArray, 0, len);
     return bArray;
-}
-
-static jobject createInetSocketAddress(JNIEnv* env, const struct sockaddr_storage* addr) {
-    char ipstr[INET6_ADDRSTRLEN];
-    int port;
-    jstring ipString;
-    if (addr->ss_family == AF_INET) {
-        struct sockaddr_in* s = (struct sockaddr_in*) addr;
-        port = ntohs(s->sin_port);
-        inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof ipstr);
-        ipString = (*env)->NewStringUTF(env, ipstr);
-    } else {
-        struct sockaddr_in6* s = (struct sockaddr_in6*) addr;
-        port = ntohs(s->sin6_port);
-        inet_ntop(AF_INET6, &s->sin6_addr, ipstr, sizeof ipstr);
-        if (strncasecmp(ipstr, ip4prefix, 7) == 0) {
-            // IPv4-mapped-on-IPv6.
-            // Cut of ::ffff: prefix to workaround performance issues when parsing these
-            // addresses in InetAddress.getByName(...).
-            //
-            // See https://github.com/netty/netty/issues/2867
-            ipString = (*env)->NewStringUTF(env, &ipstr[7]);
-        } else {
-            ipString = (*env)->NewStringUTF(env, ipstr);
-        }
-    }
-    jobject socketAddr = (*env)->NewObject(env, inetSocketAddressClass, inetSocketAddrMethodId, ipString, port);
-    return socketAddr;
 }
 
 static int socket_type(JNIEnv* env) {
@@ -675,6 +655,14 @@ static jint netty_unix_socket_isTcpQuickAck(JNIEnv* env, jclass clazz, jint fd) 
     }
     return optval;
 }
+
+static jobject netty_channel_unix_socket_getPeerCredentials(JNIEnv *env, jclass clazz, jint fd) {
+     struct ucred credentials;
+     if(netty_unix_socket_getOption(env,fd, SOL_SOCKET, SO_PEERCRED, &credentials, sizeof (credentials))) {
+         return NULL;
+     }
+     return (*env)->NewObject(env, peerCredentialsClass, peerCredentialsMethodId, credentials.pid, credentials.uid, credentials.gid);
+}
 // JNI Registered Methods End
 
 // JNI Method Registration Table Begin
@@ -718,7 +706,7 @@ static const JNINativeMethod fixed_method_table[] = {
 static const jint fixed_method_table_size = sizeof(fixed_method_table) / sizeof(fixed_method_table[0]);
 
 static jint dynamicMethodsTableSize() {
-    return fixed_method_table_size + 2;
+    return fixed_method_table_size + 3;
 }
 
 static JNINativeMethod* createDynamicMethodsTable(const char* packagePrefix) {
@@ -735,6 +723,12 @@ static JNINativeMethod* createDynamicMethodsTable(const char* packagePrefix) {
     dynamicMethod->name = "recvFromAddress";
     dynamicMethod->signature = netty_unix_util_prepend("(IJII)L", dynamicTypeName);
     dynamicMethod->fnPtr = (void *) netty_unix_socket_recvFromAddress;
+    free(dynamicTypeName);
+    ++dynamicMethod;
+    dynamicTypeName = netty_unix_util_prepend(packagePrefix, "io/netty/channel/unix/PeerCredentials;");
+    dynamicMethod->name = "getPeerCredentials";
+    dynamicMethod->signature = netty_unix_util_prepend("(I)L", dynamicTypeName);
+    dynamicMethod->fnPtr = (void *) netty_channel_unix_socket_getPeerCredentials;
     free(dynamicTypeName);
     return dynamicMethods;
 }
@@ -816,6 +810,26 @@ jint netty_unix_socket_JNI_OnLoad(JNIEnv* env, const char* packagePrefix) {
         netty_unix_errors_throwRuntimeException(env, "failed to get method ID: NetUild.isIpV4StackPreferred()");
         return JNI_ERR;
     }
+    
+    nettyClassName = netty_unix_util_prepend(packagePrefix, "io/netty/channel/unix/PeerCredentials");
+    jclass localPeerCredsClass = (*env)->FindClass(env, nettyClassName);
+    free(nettyClassName);
+    nettyClassName = NULL;
+    if (localPeerCredsClass == NULL) {
+        // pending exception...
+        return JNI_ERR;
+    }
+    peerCredentialsClass = (jclass) (*env)->NewGlobalRef(env, localPeerCredsClass);
+    if (peerCredentialsClass == NULL) {
+        // out-of-memory!
+        netty_unix_errors_throwOutOfMemoryError(env);
+        return JNI_ERR;
+    }
+    peerCredentialsMethodId = (*env)->GetMethodID(env, peerCredentialsClass, "<init>", "(III)V");
+    if (peerCredentialsMethodId == NULL) {
+        netty_unix_errors_throwRuntimeException(env, "failed to get method ID: PeerCredentials.<init>(int, int, int)");
+        return JNI_ERR;
+    }
 
     void* mem = malloc(1);
     if (mem == NULL) {
@@ -853,5 +867,9 @@ void netty_unix_socket_JNI_OnUnLoad(JNIEnv* env) {
     if (netUtilClass != NULL) {
         (*env)->DeleteGlobalRef(env, netUtilClass);
         netUtilClass = NULL;
+    }
+    if (peerCredentialsClass != NULL) {
+        (*env)->DeleteGlobalRef(env, peerCredentialsClass);
+        peerCredentialsClass = NULL;
     }
 }
